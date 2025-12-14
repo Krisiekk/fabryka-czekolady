@@ -14,7 +14,7 @@
 #include <cstdlib>
 
 // zmienne do generowania klucza bazowego ftok
-constexpr const char *kIpcKeyPath="./CMakeLists.txt";
+constexpr const char *kIpcKeyPath="/home/krzysztof/fabryka-czekolady/CMakeLists.txt";
 constexpr int kProjId = 0x42;
 
 // domyslna pojemnosc magazunu
@@ -126,7 +126,7 @@ inline void V_mutex(int semid) {
 	if (sem_up(semid, SEM_MUTEX, 1, SEM_UNDO) == -1) die_perror("V_mutex");
 }
 
-// P/V bez SEM_UNDO (dla licznikowych semaforów zasobów/pojemności)
+// P/V 
 inline void P(int semid, int semnum, int delta = 1) {
 	if (sem_down(semid, semnum, delta, 0) == -1) die_perror("P");
 }

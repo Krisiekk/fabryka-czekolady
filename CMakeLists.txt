@@ -2,12 +2,24 @@ cmake_minimum_required(VERSION 3.10)
 project(FabrykaCzekolady)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include_directories(include)
+include_directories(${CMAKE_SOURCE_DIR}/include)
 
-# Każdy proces osobny plik wykonywalny
-add_executable(main        src/main.cpp)
-add_executable(dyrektor    src/dyrektor.cpp)
-add_executable(dostawca    src/dostawca.cpp)
-add_executable(pracownik   src/pracownik.cpp)
-add_executable(raport      src/raport.cpp)
+add_executable(magazyn
+    src/magazyn.cpp
+)
+
+add_executable(dyrektor
+    src/dyrektor.cpp
+)
+
+
+add_executable(dostawca
+    src/dostawca.cpp
+)
+
+
+add_executable(stanowisko
+    src/stanowisko.cpp
+)
