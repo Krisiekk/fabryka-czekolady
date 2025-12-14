@@ -6,6 +6,7 @@
 #include <iostream>
 #include <string>
 #include <unistd.h>
+#include <cerrno>
 
 namespace {
 int g_msgid = -1;
@@ -14,6 +15,8 @@ int g_shmid = -1;
 WarehouseState *g_state = nullptr;
 bool g_stop = false;
 bool g_fresh = false;
+
+// void add_supply(char type, int amount);
 
 std::string g_stateFile = "magazyn_state.txt";
 
@@ -151,69 +154,50 @@ void cleanup_ipc() {
 	
 }
 
+
+
 void process_worker_request(const WorkerRequestMessage &req){
-	WarehouseReplyMessage reply{};
-	reply.mtype = req.pid;
-	reply.granted =false;
+    std::cout << "[MAGAZYN] request od PID=" << req.pid
+              << " A=" << req.needA << " B=" << req.needB
+              << " C=" << req.needC << " D=" << req.needD << "\n";
 
-	P(g_semid,SEM_A,req.needA);
-	P(g_semid,SEM_B,req.needB);
-	P(g_semid,SEM_C,req.needC);
-	P(g_semid,SEM_D,req.needD);
+    
+    if (req.needA) P(g_semid, SEM_A, req.needA);
+    if (req.needB) P(g_semid, SEM_B, req.needB);
+    if (req.needC) P(g_semid, SEM_C, req.needC);
+    if (req.needD) P(g_semid, SEM_D, req.needD);
 
-	P_mutex(g_semid);
-	
-	g_state->a -= req.needA;
-	g_state->b -= req.needB;
-	g_state->c -= req.needC;
-	g_state->d -= req.needD;
-	V_mutex(g_semid);
+    
+    P_mutex(g_semid);
+    g_state->a -= req.needA;
+    g_state->b -= req.needB;
+    g_state->c -= req.needC;
+    g_state->d -= req.needD;
+    V_mutex(g_semid);
 
-	int freed = req.needA + req.needB + 2*req.needC + 3*req.needD;
+ 
+    int freed = req.needA + req.needB + 2*req.needC + 3*req.needD;
+    if (freed > 0) V(g_semid, SEM_CAPACITY, freed);
 
-	V(g_semid,SEM_CAPACITY,freed);
+    
+    WarehouseReplyMessage reply{};
+    reply.mtype = req.pid;
+    reply.granted = true;
 
-	reply.granted =true;
+    std::cout << "[MAGAZYN] reply -> PID=" << reply.mtype
+              << " granted=" << reply.granted << "\n";
 
-	if(msgsnd(g_msgid,&reply,sizeof(reply)-sizeof(long),0)== -1) perror("msgsend reply");
-
-
-
+    if (msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0) == -1)
+        perror("msgsnd reply");
 }
+
 
 void process_supplier_report(const SupplierReportMessage &rep){
-	std::cout<<"[MAGAZYN]"<<rep.text<<std::endl;
-
-
-}
-
-void add_supply(char type, int amount){
-	int units =0;
-	int semIndex = SEM_A;
-	
-	switch (type)
-	{
-		case 'A' : units = amount *1; semIndex = SEM_A; break;
-		case 'B' : units = amount *1; semIndex = SEM_B; break;
-		case 'C' : units = amount *2; semIndex = SEM_C; break;
-		case 'D' : units = amount *3; semIndex = SEM_D; break;
-		default  : return;
-
-	}
-
-	P(g_semid, SEM_CAPACITY, units);
-
-	P_mutex(g_semid);
-	if(type == 'A') g_state->a +=amount;
-	if(type == 'B') g_state->b +=amount;
-	if(type == 'C') g_state->c +=amount;
-	if(type == 'D') g_state->d +=amount;
-	V_mutex(g_semid);
-
-	V(g_semid,semIndex,amount);
-
+	std::cout << "[MAGAZYN]" << rep.text << std::endl;
 
 }
+
+
 
 void loop(){
 
@@ -279,8 +263,9 @@ int main (int argc, char **argv){
 	std::signal(SIGINT,handle_signal);
 
 	init_ipc(capacity);
-	if(g_fresh){
-	load_state_from_file();
+
+	if (!g_fresh) {
+		load_state_from_file();
 	}
 
 	loop();

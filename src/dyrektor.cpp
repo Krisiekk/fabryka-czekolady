@@ -72,6 +72,12 @@ namespace {
         }
     }
 
+    void send_command_to_all(Command cmd, int count) {
+    for (int i = 0; i < count; ++i) {
+        send_command(cmd);
+    }
+}
+
     void remove_ipcs(){
         if(g_msgid!=-1)msgctl(g_msgid,IPC_RMID,nullptr);
         if(g_semid!=-1)semctl(g_semid,0,IPC_RMID);
@@ -118,22 +124,22 @@ namespace {
             if(!std::cin) break;
 
             if (choice == '1'){
-                send_command(Command::StopFabryka);
+                send_command_to_all(Command::StopFabryka,2);
 
             }
 
             else if (choice =='2'){
-                send_command(Command::StopMagazyn);
+                send_command_to_all(Command::StopMagazyn,1);
 
             }
 
             else if (choice == '3'){
 
-                send_command(Command::StopDostawcy);
+                send_command_to_all(Command::StopDostawcy,4);
             }
 
             else if (choice == '4'){
-                send_command(Command::StopAll);
+                send_command_to_all(Command::StopAll, 7);
                 break;
             }
 
@@ -164,6 +170,13 @@ int main( int argc, char **argv){
     menu_loop();
 
     send_command(Command::StopAll);
+    sleep(1); // daj czas na odbiór polecenia
+
+    // Awaryjne zakończenie, jeśli któryś proces wisi (np. blokujące msgrcv).
+    for (pid_t pid : g_children) {
+        if (pid > 0) kill(pid, SIGTERM);
+    }
+
     wait_children();
     remove_ipcs();
 

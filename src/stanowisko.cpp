@@ -16,6 +16,8 @@ namespace {
 	bool g_stop = false;
 	int g_workerType =1; // 1 albo 2
 
+	void check_command();
+
 	void handle_signal(int){g_stop = true;}
 
 	key_t make_key(){
@@ -61,32 +63,46 @@ namespace {
 
 
 		}
-		if(msgsnd(g_msgid,&req,sizeof(req)- sizeof(long),0)== -1){
-			perror("msgsnd worker request");
-			return;
-		}
-
-		WarehouseReplyMessage rep{};
-
-		ssize_t r = msgrcv(g_msgid,&rep, sizeof(rep)- sizeof(long), static_cast<long>(MsgType::WarehouseReply),0);
-		if (r == -1){
-			perror("msgrcv worker replay");
-			return;
-
-		}
-		if(!rep.granted){
-			std::cerr<<"Brak surowcow dla pracownika \n";
-			sleep(1);
-			return;
-
-		}
-
-		std::cout<<"Pracownik"<<g_workerType<<"Produkuje czekolade ... "<<std::endl;
-		sleep(1);
 
 
+		   if (msgsnd(g_msgid, &req, sizeof(req) - sizeof(long), 0) == -1) {
+        perror("msgsnd worker request");
+        return;
+    }
 
 
+    WarehouseReplyMessage rep{};
+    while (!g_stop) {
+        ssize_t r = msgrcv(g_msgid, &rep, sizeof(rep) - sizeof(long), req.pid, IPC_NOWAIT);
+
+        if (r >= 0) {
+            std::cout << "[PRACOWNIK] got reply: pid=" << getpid()
+                      << " granted=" << rep.granted << "\n";
+            break;
+        }
+
+        if (errno == ENOMSG) {
+            check_command();
+            usleep(100000);
+            continue;
+        }
+        if (errno == EINTR) {
+            if (g_stop) return;
+            continue;
+        }
+
+        perror("msgrcv worker reply");
+        return;
+    }
+
+    if(!rep.granted){
+        std::cerr << "Brak surowcow dla pracownika\n";
+        sleep(1);
+        return;
+    }
+
+    std::cout << "Pracownik " << g_workerType << " Produkuje czekolade ...\n";
+    sleep(1);
 	}
 
 	void check_command() {

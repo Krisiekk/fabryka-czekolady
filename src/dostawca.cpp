@@ -18,6 +18,37 @@ char g_type = 'A'; // jaki dostawca
 //gdy dostaniemy sygnal SIGTERM lub SIGINT g stop na true koniec petli
 void handle_signal(int) {g_stop = true;}
 
+static int units_per_item(char t){
+    switch(t){
+        case 'A': return 1;
+        case 'B': return 1;
+        case 'C': return 2;
+        case 'D': return 3;
+        default: return 1;
+    }
+}
+
+static int sem_index_for(char t){
+    switch(t){
+        case 'A': return SEM_A;
+        case 'B': return SEM_B;
+        case 'C': return SEM_C;
+        case 'D': return SEM_D;
+        default:  return SEM_A;
+    }
+}
+
+
+static int target_units(char t, int capUnits){
+    switch(t){
+        case 'A': return (2 * capUnits) / 9;
+        case 'B': return (2 * capUnits) / 9;
+        case 'C': return (2 * capUnits) / 9;
+        case 'D': return (3 * capUnits) / 9;
+        default:  return capUnits / 4;
+    }
+}
+
 
 // tworzenie wspolnego klucza
 key_t make_key(){
@@ -57,39 +88,68 @@ int units_per_items(char type){
 
 }
 
-// ktory semafor odpowiada danemu skladnikowi
-int sem_index_for(char type){
 
-	switch (type)
-	{
-	
-		case 'A' : return SEM_A;
-		case 'B' : return SEM_B;
-		case 'C' : return SEM_C;
-		case 'D' : return SEM_D;
-
-		default : return SEM_A;
-	}
-}
 
 void deliver_once(int amount){
-	int units = amount* units_per_items(g_type);
-	P(g_semid,SEM_CAPACITY,units);
-	P_mutex(g_semid);
-	if(g_type =='A')g_state->a +=amount;
-	if(g_type =='B')g_state->b +=amount;
-	if(g_type =='C')g_state->c +=amount;
-	if(g_type =='D')g_state->d +=amount;
-	V_mutex(g_semid);
-	V(g_semid,sem_index_for(g_type),amount);
+    int uPer = units_per_item(g_type);
+    int units = amount * uPer;
 
-	SupplierReportMessage rep{};
-	rep.mtype = static_cast<long>(MsgType::SupplierReport);
-	std::snprintf(rep.text,sizeof(rep.text),"Dostawca %c + %d",g_type,amount);
-	if(msgsnd(g_msgid,&rep,sizeof(rep)-sizeof(long),IPC_NOWAIT)==-1){
-		perror("msgsend report");
-	}
+    // 1) Sprawdź miks bez trzymania mutexa podczas semop na pojemność
+    P_mutex(g_semid);
+    int cap = g_state->capacity;
 
+    int a = g_state->a, b = g_state->b, c = g_state->c, d = g_state->d;
+    int usedUnits = a + b + 2*c + 3*d;
+    int freeUnits = cap - usedUnits;
+    if (freeUnits < 0) freeUnits = 0;
+
+    int myUnitsNow = 0;
+    if(g_type=='A') myUnitsNow = a * 1;
+    if(g_type=='B') myUnitsNow = b * 1;
+    if(g_type=='C') myUnitsNow = c * 2;
+    if(g_type=='D') myUnitsNow = d * 3;
+
+    int myTarget = target_units(g_type, cap);
+
+    V_mutex(g_semid);
+
+
+    if (freeUnits < 10 && myUnitsNow > myTarget) {
+        std::cout << "[DOSTAWCA " << g_type << "] miks OK? mam " << myUnitsNow
+                  << "u > target " << myTarget << "u, czekam\n";
+        usleep(300000);
+        return;
+    }
+
+  
+    sembuf op{static_cast<unsigned short>(SEM_CAPACITY), static_cast<short>(-units), IPC_NOWAIT};
+    if (semop(g_semid, &op, 1) == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            std::cout << "[DOSTAWCA " << g_type << "] magazyn pełny, czekam\n";
+            usleep(300000);
+            return;
+        }
+        perror("semop capacity");
+        return;
+    }
+
+
+    P_mutex(g_semid);
+    if(g_type =='A') g_state->a += amount;
+    if(g_type =='B') g_state->b += amount;
+    if(g_type =='C') g_state->c += amount;
+    if(g_type =='D') g_state->d += amount;
+    V_mutex(g_semid);
+
+    V(g_semid, sem_index_for(g_type), amount);
+
+    std::cout << "[DOSTAWCA " << g_type << "] +" << amount << "\n";
+
+   
+    SupplierReportMessage rep{};
+    rep.mtype = static_cast<long>(MsgType::SupplierReport);
+    std::snprintf(rep.text, sizeof(rep.text), "Dostawca %c + %d", g_type, amount);
+    msgsnd(g_msgid, &rep, sizeof(rep) - sizeof(long), IPC_NOWAIT);
 }
 
 void check_command() {

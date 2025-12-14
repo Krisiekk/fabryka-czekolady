@@ -14,7 +14,7 @@
 #include <cstdlib>
 
 // zmienne do generowania klucza bazowego ftok
-constexpr const char *kIpcKeyPath="/home/krzysztof/fabryka-czekolady/CMakeLists.txt";
+constexpr const char *kIpcKeyPath="./ipc.key";
 constexpr int kProjId = 0x42;
 
 // domyslna pojemnosc magazunu
