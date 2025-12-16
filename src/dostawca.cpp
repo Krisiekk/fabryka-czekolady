@@ -1,7 +1,9 @@
 #include "../include/common.h"
 
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -143,6 +145,14 @@ void deliver_once(int amount){
 
     V(g_semid, sem_index_for(g_type), amount);
 
+    // Logowanie do pliku
+    char buf[128];
+    P_mutex(g_semid);
+    std::snprintf(buf, sizeof(buf), "Dostarczono %d x %c (stan: A=%d B=%d C=%d D=%d)",
+                  amount, g_type, g_state->a, g_state->b, g_state->c, g_state->d);
+    V_mutex(g_semid);
+    log_raport(g_semid, "DOSTAWCA", buf);
+
     std::cout << "[DOSTAWCA " << g_type << "] +" << amount << "\n";
 
    
@@ -199,12 +209,13 @@ int main(int argc, char **argv){
 
 	attach_ipc();
 
+	srand(static_cast<unsigned>(time(nullptr)) ^ getpid());  // seed dla losowych przerw
+
 	while(!g_stop){
 		deliver_once(amount);
 		check_command();
-		sleep(1); // symulacja przerwy
-
-
+		int delay = (rand() % 3) + 1;  // losowa przerwa 1-3 sekundy
+		sleep(delay);
 	}
 	if(g_state &&shmdt(g_state)==-1) perror("shmdt");
 

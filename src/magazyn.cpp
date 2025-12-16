@@ -157,6 +157,12 @@ void cleanup_ipc() {
 
 
 void process_worker_request(const WorkerRequestMessage &req){
+    // Logowanie żądania do pliku
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "Żądanie od stanowiska %d (pid=%d): A=%d B=%d C=%d D=%d",
+                  req.workerType, req.pid, req.needA, req.needB, req.needC, req.needD);
+    log_raport(g_semid, "MAGAZYN", buf);
+
     std::cout << "[MAGAZYN] request od PID=" << req.pid
               << " A=" << req.needA << " B=" << req.needB
               << " C=" << req.needC << " D=" << req.needD << "\n";
@@ -183,6 +189,14 @@ void process_worker_request(const WorkerRequestMessage &req){
     WarehouseReplyMessage reply{};
     reply.mtype = req.pid;
     reply.granted = true;
+
+    // Logowanie wydania do pliku
+    char buf2[128];
+    P_mutex(g_semid);
+    std::snprintf(buf2, sizeof(buf2), "Wydano surowce dla stanowiska %d (pid=%d), stan: A=%d B=%d C=%d D=%d",
+                  req.workerType, req.pid, g_state->a, g_state->b, g_state->c, g_state->d);
+    V_mutex(g_semid);
+    log_raport(g_semid, "MAGAZYN", buf2);
 
     std::cout << "[MAGAZYN] reply -> PID=" << reply.mtype
               << " granted=" << reply.granted << "\n";
@@ -264,8 +278,16 @@ int main (int argc, char **argv){
 
 	init_ipc(capacity);
 
-	if (!g_fresh) {
+	// Logowanie startu magazynu
+	char startbuf[64];
+	std::snprintf(startbuf, sizeof(startbuf), "Start magazynu (capacity=%d)", capacity);
+	log_raport(g_semid, "MAGAZYN", startbuf);
+
+	std::ifstream test(g_stateFile);
+	if (test.good()) {
+		std::cout << "[MAGAZYN] wczytuje z pliku\n";
 		load_state_from_file();
+		log_raport(g_semid, "MAGAZYN", "Wczytano stan z pliku");
 	}
 
 	loop();

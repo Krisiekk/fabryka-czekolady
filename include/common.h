@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 
 // zmienne do generowania klucza bazowego ftok
 constexpr const char *kIpcKeyPath="./ipc.key";
@@ -95,9 +96,8 @@ enum SemaphoreIndex{
 	SEM_B = 3,
 	SEM_C = 4,
 	SEM_D = 5,
-	SEM_COUNT = 6
-
-
+	SEM_RAPORT = 6,
+	SEM_COUNT = 7
 };
 
 inline void die_perror(const char *msg){
@@ -135,7 +135,24 @@ inline void V(int semid, int semnum, int delta = 1) {
 	if (sem_up(semid, semnum, delta, 0) == -1) die_perror("V");
 }
 
+// Ścieżka do pliku raportu
+constexpr const char *kRaportPath = "raport.txt";
 
-
+// Logowanie do wspólnego pliku z ochroną semaforem
+inline void log_raport(int semid, const char* proces, const char* msg) {
+	P_mutex(semid);  // używamy tego samego mutexa dla prostoty
+	
+	FILE* f = fopen(kRaportPath, "a");
+	if (f) {
+		time_t now = time(nullptr);
+		char timebuf[64];
+		strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&now));
+		fprintf(f, "[%s] %s: %s\n", timebuf, proces, msg);
+		fflush(f);
+		fclose(f);
+	}
+	
+	V_mutex(semid);
+}
 
 #endif  // COMMON_H

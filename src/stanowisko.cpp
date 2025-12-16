@@ -1,9 +1,10 @@
 
 #include "../include/common.h"
 
-
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -101,8 +102,15 @@ namespace {
         return;
     }
 
+    // Logowanie do pliku
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "Stanowisko %d wyprodukowano czekolade (pid=%d)", 
+                  g_workerType, getpid());
+    log_raport(g_semid, "STANOWISKO", buf);
+
     std::cout << "Pracownik " << g_workerType << " Produkuje czekolade ...\n";
-    sleep(1);
+    int delay = (rand() % 2) + 1;  // losowa przerwa 1-2 sekundy na produkcje
+    sleep(delay);
 	}
 
 	void check_command() {
@@ -140,6 +148,8 @@ int main (int argc, char **argv){
 
 	g_workerType = std::atoi(argv[1]);
 	if(g_workerType !=1 && g_workerType !=2 ) g_workerType=1;
+
+	srand(static_cast<unsigned>(time(nullptr)) ^ getpid());  // seed dla losowych przerw
 
 	std::signal(SIGTERM, handle_signal);
 	std::signal(SIGINT, handle_signal);

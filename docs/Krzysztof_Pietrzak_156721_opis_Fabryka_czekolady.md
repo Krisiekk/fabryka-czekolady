@@ -78,3 +78,22 @@ fabryka-czekolady/
 - System kompilacji: `cmake` + `make`
 - Kontrola wersji: `git`
 - Repozytorium: **GitHub – projekt publiczny**
+
+
+
+
+
+┌─────────────┐
+│  DYREKTOR   │ ← Ty wpisujesz komendy 1-4
+└──────┬──────┘
+       │ fork()+exec()
+       ▼
+┌──────────────┐    kolejka msg    ┌─────────────┐
+│   MAGAZYN    │◄─────────────────►│  DOSTAWCA   │ x4
+│              │    semafory       │  (A,B,C,D)  │
+│  pamięć shm  │◄─────────────────►└─────────────┘
+│              │    
+└──────────────┘    kolejka msg    ┌─────────────┐
+       ▲        ◄─────────────────►│ STANOWISKO  │ x2
+       │           semafory        │   (1, 2)    │
+       └───────────────────────────┴─────────────┘
