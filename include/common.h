@@ -6,6 +6,8 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -140,6 +142,7 @@ inline void V(int semid, int semnum, int delta = 1) {
 constexpr const char *kRaportPath = "raport.txt";
 
 // Logowanie do wspólnego pliku z ochroną semaforem SEM_RAPORT
+// Używa syscalli open/write/close (wymaganie 5.2 - obsługa plików)
 inline void log_raport(int semid, const char* proces, const char* msg) {
 	// Używamy osobnego semafora SEM_RAPORT (nie SEM_MUTEX) żeby nie blokować całego systemu podczas I/O
 	if (sem_down(semid, SEM_RAPORT, 1, SEM_UNDO) == -1) {
@@ -147,14 +150,31 @@ inline void log_raport(int semid, const char* proces, const char* msg) {
 		return;
 	}
 	
-	FILE* f = fopen(kRaportPath, "a");
-	if (f) {
+	// Otwórz plik z flagami: O_WRONLY (zapis), O_CREAT (utwórz jeśli nie istnieje), O_APPEND (dopisuj na końcu)
+	int fd = open(kRaportPath, O_WRONLY | O_CREAT | O_APPEND, 0600);
+	if (fd != -1) {
+		// Przygotuj timestamp (localtime_r jest thread-safe)
 		time_t now = time(nullptr);
+		struct tm tmnow{};
+		localtime_r(&now, &tmnow);
 		char timebuf[64];
-		strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&now));
-		fprintf(f, "[%s] %s: %s\n", timebuf, proces, msg);
-		fflush(f);
-		fclose(f);
+		strftime(timebuf, sizeof(timebuf), "%H:%M:%S", &tmnow);
+		
+		// Sformatuj linię logu
+		char linebuf[256];
+		int len = snprintf(linebuf, sizeof(linebuf), "[%s] %s: %s\n", timebuf, proces, msg);
+		
+		// Zapisz do pliku (syscall write)
+		if (len > 0 && len < static_cast<int>(sizeof(linebuf))) {
+			if (write(fd, linebuf, len) == -1) {
+				perror("write raport");
+			}
+		}
+		
+		// Zamknij plik (syscall close)
+		close(fd);
+	} else {
+		perror("open raport");
 	}
 	
 	if (sem_up(semid, SEM_RAPORT, 1, SEM_UNDO) == -1) {

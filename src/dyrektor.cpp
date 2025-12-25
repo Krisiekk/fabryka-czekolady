@@ -100,6 +100,52 @@ namespace {
 
     }
 
+    // Graceful shutdown z grace period
+    void graceful_shutdown() {
+        // 1) Wyślij StopAll do wszystkich procesów (7 = 1 magazyn + 4 dostawców + 2 stanowiska)
+        send_command_to_all(Command::StopAll, 7);
+        
+        // 2) Grace period: czekaj do 5 sekund aż procesy same się zakończą
+        std::vector<bool> reaped(g_children.size(), false);
+
+        for (int i = 0; i < 10; ++i) {  // 10 x 500ms = 5 sekund
+            bool all_done = true;
+            for (size_t j = 0; j < g_children.size(); ++j) {
+                pid_t pid = g_children[j];
+                if (pid <= 0 || reaped[j]) continue;
+
+                int status = 0;
+                pid_t r = waitpid(pid, &status, WNOHANG);
+                if (r == 0) {
+                    all_done = false;
+                } else if (r == pid) {
+                    reaped[j] = true;
+                }
+            }
+            if (all_done) {
+                std::cout << "[DYREKTOR] Wszystkie procesy zakończone gracefully.\n";
+                return;
+            }
+            usleep(500000);  // 500ms
+        }
+        
+        // 3) Timeout - wyślij SIGTERM tylko do tych co jeszcze żyją
+        std::cout << "[DYREKTOR] Timeout - wysyłam SIGTERM do pozostałych procesów.\n";
+        for (size_t j = 0; j < g_children.size(); ++j) {
+            pid_t pid = g_children[j];
+            if (pid <= 0 || reaped[j]) continue;
+            kill(pid, SIGTERM);
+        }
+        
+        // 4) Final wait tylko dla tych co nie zostały jeszcze zebrane
+        for (size_t j = 0; j < g_children.size(); ++j) {
+            pid_t pid = g_children[j];
+            if (pid <= 0 || reaped[j]) continue;
+            int status = 0;
+            waitpid(pid, &status, 0);
+        }
+    }
+
     void start_processes(int capacity){
         spawn({"./magazyn",std::to_string(capacity)});
 
@@ -174,15 +220,9 @@ int main( int argc, char **argv){
 
     menu_loop();
 
-    send_command(Command::StopAll);
-    sleep(1); // daj czas na odbiór polecenia
+    // Graceful shutdown z grace period (daje czas na save_state_to_file)
+    graceful_shutdown();
 
-    // Awaryjne zakończenie, jeśli któryś proces wisi (np. blokujące msgrcv).
-    for (pid_t pid : g_children) {
-        if (pid > 0) kill(pid, SIGTERM);
-    }
-
-    wait_children();
     remove_ipcs();
 
 
