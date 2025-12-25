@@ -14,11 +14,11 @@ int g_msgid =-1;  // id kolejki komunikatow
 int g_semid = -1; // id zestawu semaforow
 int g_shmid = -1; // id pamieci dzielonej
 WarehouseState  *g_state = nullptr; // wskaznik  na stan magazynu 
-bool g_stop = false; // flaga zakonczenia petli
+volatile sig_atomic_t g_stop = 0; // flaga zakonczenia petli (sig_atomic_t dla bezpieczenstwa handlera)
 char g_type = 'A'; // jaki dostawca
 
-//gdy dostaniemy sygnal SIGTERM lub SIGINT g stop na true koniec petli
-void handle_signal(int) {g_stop = true;}
+//gdy dostaniemy sygnal SIGTERM lub SIGINT g stop na 1 koniec petli
+void handle_signal(int) {g_stop = 1;}
 
 static int units_per_item(char t){
     switch(t){
@@ -72,23 +72,9 @@ void attach_ipc() {
 	g_semid =semget(key,SEM_COUNT,0600); // dolaczenie do istniejacego zestawu semaforow
 	if(g_semid ==-1) die_perror("semget");
 	g_msgid = msgget(key,0600);
-	if(g_msgid == -1) die_perror("msget");
+	if(g_msgid == -1) die_perror("msgget");
 
 };
-
-int units_per_items(char type){
-
-	switch (type)
-	{
-		case 'A' : return 1;
-		case 'B' : return 1;
-		case 'C' : return 2;
-		case 'D' : return 3;
-
-		default : return 1;
-	}
-
-}
 
 
 
@@ -159,7 +145,9 @@ void deliver_once(int amount){
     SupplierReportMessage rep{};
     rep.mtype = static_cast<long>(MsgType::SupplierReport);
     std::snprintf(rep.text, sizeof(rep.text), "Dostawca %c + %d", g_type, amount);
-    msgsnd(g_msgid, &rep, sizeof(rep) - sizeof(long), IPC_NOWAIT);
+    if (msgsnd(g_msgid, &rep, sizeof(rep) - sizeof(long), IPC_NOWAIT) == -1 && errno != EAGAIN) {
+        perror("msgsnd report");
+    }
 }
 
 void check_command() {
@@ -204,8 +192,7 @@ int main(int argc, char **argv){
 	g_type = argv[1][0];
 	int amount = (argc>= 3)? std::atoi(argv[2]):1;
 	if(amount<=0) amount =1;
-	std::signal(SIGTERM, handle_signal);
-	std::signal(SIGINT,handle_signal);
+	setup_sigaction(handle_signal);
 
 	attach_ipc();
 

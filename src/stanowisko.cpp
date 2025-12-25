@@ -14,12 +14,12 @@ namespace {
 	int g_semid = -1;
 	int g_shmid = -1;
 	WarehouseState *g_state = nullptr;
-	bool g_stop = false;
+	volatile sig_atomic_t g_stop = 0;
 	int g_workerType =1; // 1 albo 2
 
 	void check_command();
 
-	void handle_signal(int){g_stop = true;}
+	void handle_signal(int){g_stop = 1;}
 
 	key_t make_key(){
 		key_t key = ftok(kIpcKeyPath,kProjId);
@@ -97,8 +97,8 @@ namespace {
     }
 
     if(!rep.granted){
-        std::cerr << "Brak surowcow dla pracownika\n";
-        sleep(1);
+        std::cerr << "Brak surowcow dla pracownika, czekam...\n";
+        usleep(1000000 + (rand() % 1000000));
         return;
     }
 
@@ -109,7 +109,7 @@ namespace {
     log_raport(g_semid, "STANOWISKO", buf);
 
     std::cout << "Pracownik " << g_workerType << " Produkuje czekolade ...\n";
-    int delay = (rand() % 2) + 1;  // losowa przerwa 1-2 sekundy na produkcje
+    int delay = (rand() % 2) + 1;
     sleep(delay);
 	}
 
@@ -149,10 +149,8 @@ int main (int argc, char **argv){
 	g_workerType = std::atoi(argv[1]);
 	if(g_workerType !=1 && g_workerType !=2 ) g_workerType=1;
 
-	srand(static_cast<unsigned>(time(nullptr)) ^ getpid());  // seed dla losowych przerw
-
-	std::signal(SIGTERM, handle_signal);
-	std::signal(SIGINT, handle_signal);
+	srand(static_cast<unsigned>(time(nullptr)) ^ getpid());
+	setup_sigaction(handle_signal);
 
 	attach_ipc();
 

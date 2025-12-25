@@ -15,6 +15,9 @@ namespace {
     int g_msgid = -1;
     int g_semid = -1;
     int g_shmid = -1;
+    volatile sig_atomic_t g_stop = 0;
+
+    void handle_signal(int) { g_stop = 1; }
 
     void die_exec(const char *what){
         perror(what);
@@ -162,6 +165,8 @@ int main( int argc, char **argv){
     int capacity = kDefaultCapacity;
     if(argc >1) capacity =std::atoi(argv[1]);
     if(capacity<=0) capacity =kDefaultCapacity;
+
+    setup_sigaction(handle_signal);
 
     start_processes(capacity);
 

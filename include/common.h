@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -138,9 +139,13 @@ inline void V(int semid, int semnum, int delta = 1) {
 // Ścieżka do pliku raportu
 constexpr const char *kRaportPath = "raport.txt";
 
-// Logowanie do wspólnego pliku z ochroną semaforem
+// Logowanie do wspólnego pliku z ochroną semaforem SEM_RAPORT
 inline void log_raport(int semid, const char* proces, const char* msg) {
-	P_mutex(semid);  // używamy tego samego mutexa dla prostoty
+	// Używamy osobnego semafora SEM_RAPORT (nie SEM_MUTEX) żeby nie blokować całego systemu podczas I/O
+	if (sem_down(semid, SEM_RAPORT, 1, SEM_UNDO) == -1) {
+		perror("P SEM_RAPORT");
+		return;
+	}
 	
 	FILE* f = fopen(kRaportPath, "a");
 	if (f) {
@@ -152,7 +157,32 @@ inline void log_raport(int semid, const char* proces, const char* msg) {
 		fclose(f);
 	}
 	
-	V_mutex(semid);
+	if (sem_up(semid, SEM_RAPORT, 1, SEM_UNDO) == -1) {
+		perror("V SEM_RAPORT");
+	}
+}
+
+// Ustawienie obsługi sygnałów przez sigaction (zalecane nad signal())
+// handler - funkcja obsługi sygnału, przyjmuje int (numer sygnału)
+// Obsługiwane sygnały: SIGINT, SIGTERM, SIGUSR1, SIGUSR2
+inline void setup_sigaction(void (*handler)(int)) {
+	struct sigaction sa{};
+	sa.sa_handler = handler;
+	sa.sa_flags = 0;  // bez SA_RESTART - przerwane syscalle zwrócą EINTR
+	sigemptyset(&sa.sa_mask);  // nie blokuj innych sygnałów podczas obsługi
+	
+	if (sigaction(SIGTERM, &sa, nullptr) == -1) {
+		perror("sigaction SIGTERM");
+	}
+	if (sigaction(SIGINT, &sa, nullptr) == -1) {
+		perror("sigaction SIGINT");
+	}
+	if (sigaction(SIGUSR1, &sa, nullptr) == -1) {
+		perror("sigaction SIGUSR1");
+	}
+	if (sigaction(SIGUSR2, &sa, nullptr) == -1) {
+		perror("sigaction SIGUSR2");
+	}
 }
 
 #endif  // COMMON_H

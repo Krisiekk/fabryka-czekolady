@@ -13,7 +13,7 @@ int g_msgid = -1;
 int g_semid = -1;
 int g_shmid = -1;
 WarehouseState *g_state = nullptr;
-bool g_stop = false;
+volatile sig_atomic_t g_stop = 0;
 bool g_fresh = false;
 
 // void add_supply(char type, int amount);
@@ -28,7 +28,7 @@ union semun{
 
 };
 
-void handle_signal (int) {g_stop = true;}
+void handle_signal (int) {g_stop = 1;}
 
 key_t make_key(){
 	key_t key = ftok(kIpcKeyPath,kProjId);
@@ -85,6 +85,9 @@ void init_ipc(int capacity){
 	if(semctl(g_semid,SEM_B,SETVAL,arg)== -1) die_perror("semctl SEM_B");
 	if(semctl(g_semid,SEM_C,SETVAL,arg)== -1) die_perror("semctl SEM_C");
 	if(semctl(g_semid,SEM_D,SETVAL,arg)== -1) die_perror("semctl SEM_D");
+
+	arg.val = 1;  // SEM_RAPORT = mutex do pliku raportu
+	if(semctl(g_semid,SEM_RAPORT,SETVAL,arg)== -1) die_perror("semctl SEM_RAPORT");
 
 	}
 
@@ -149,6 +152,13 @@ void save_state_to_file(){
 
 }
 
+// Pomocnicza funkcja do nieblokującego P (zwraca true jeśli sukces)
+bool try_P(int semid, int semnum, int delta) {
+    if (delta <= 0) return true;
+    sembuf op{static_cast<unsigned short>(semnum), static_cast<short>(-delta), IPC_NOWAIT};
+    return semop(semid, &op, 1) == 0;
+}
+
 void cleanup_ipc() {
 	if (g_state && shmdt(g_state) == -1) perror("shmdt");
 	
@@ -167,11 +177,53 @@ void process_worker_request(const WorkerRequestMessage &req){
               << " A=" << req.needA << " B=" << req.needB
               << " C=" << req.needC << " D=" << req.needD << "\n";
 
-    
-    if (req.needA) P(g_semid, SEM_A, req.needA);
-    if (req.needB) P(g_semid, SEM_B, req.needB);
-    if (req.needC) P(g_semid, SEM_C, req.needC);
-    if (req.needD) P(g_semid, SEM_D, req.needD);
+
+    bool gotA = try_P(g_semid, SEM_A, req.needA);
+    if (!gotA) {
+     
+        WarehouseReplyMessage reply{};
+        reply.mtype = req.pid;
+        reply.granted = false;
+        std::cout << "[MAGAZYN] brak A, odmowa dla PID=" << req.pid << "\n";
+        msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
+        return;
+    }
+
+    bool gotB = try_P(g_semid, SEM_B, req.needB);
+    if (!gotB) {
+        if (req.needA) V(g_semid, SEM_A, req.needA);
+        WarehouseReplyMessage reply{};
+        reply.mtype = req.pid;
+        reply.granted = false;
+        std::cout << "[MAGAZYN] brak B, odmowa dla PID=" << req.pid << "\n";
+        msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
+        return;
+    }
+
+    bool gotC = try_P(g_semid, SEM_C, req.needC);
+    if (!gotC) {
+        if (req.needA) V(g_semid, SEM_A, req.needA);
+        if (req.needB) V(g_semid, SEM_B, req.needB);
+        WarehouseReplyMessage reply{};
+        reply.mtype = req.pid;
+        reply.granted = false;
+        std::cout << "[MAGAZYN] brak C, odmowa dla PID=" << req.pid << "\n";
+        msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
+        return;
+    }
+
+    bool gotD = try_P(g_semid, SEM_D, req.needD);
+    if (!gotD) {
+        if (req.needA) V(g_semid, SEM_A, req.needA);
+        if (req.needB) V(g_semid, SEM_B, req.needB);
+        if (req.needC) V(g_semid, SEM_C, req.needC);
+        WarehouseReplyMessage reply{};
+        reply.mtype = req.pid;
+        reply.granted = false;
+        std::cout << "[MAGAZYN] brak D, odmowa dla PID=" << req.pid << "\n";
+        msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
+        return;
+    }
 
     
     P_mutex(g_semid);
@@ -181,16 +233,15 @@ void process_worker_request(const WorkerRequestMessage &req){
     g_state->d -= req.needD;
     V_mutex(g_semid);
 
- 
     int freed = req.needA + req.needB + 2*req.needC + 3*req.needD;
     if (freed > 0) V(g_semid, SEM_CAPACITY, freed);
 
-    
+  
     WarehouseReplyMessage reply{};
     reply.mtype = req.pid;
     reply.granted = true;
 
-    // Logowanie wydania do pliku
+   
     char buf2[128];
     P_mutex(g_semid);
     std::snprintf(buf2, sizeof(buf2), "Wydano surowce dla stanowiska %d (pid=%d), stan: A=%d B=%d C=%d D=%d",
@@ -216,6 +267,8 @@ void process_supplier_report(const SupplierReportMessage &rep){
 void loop(){
 
 	while(!g_stop){
+
+
 		CommandMessage cmd{};
 		ssize_t r = msgrcv(g_msgid,&cmd,sizeof(cmd)-sizeof(long),static_cast<long>(MsgType::CommandBroadcast),IPC_NOWAIT);
 		
@@ -273,8 +326,7 @@ int main (int argc, char **argv){
 	int capacity = kDefaultCapacity;
 	if(argc>1) capacity =std::atoi(argv[1]);
 
-	std::signal(SIGTERM, handle_signal);
-	std::signal(SIGINT,handle_signal);
+	setup_sigaction(handle_signal);
 
 	init_ipc(capacity);
 
