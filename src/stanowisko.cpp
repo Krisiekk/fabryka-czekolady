@@ -161,6 +161,12 @@ int main (int argc, char **argv){
 
 
 	}
+	
+	
+	char endbuf[64];
+	std::snprintf(endbuf, sizeof(endbuf), "Stanowisko %d konczy prace (pid=%d)", g_workerType, getpid());
+	log_raport(g_semid, "STANOWISKO", endbuf);
+	
 	if(g_state && shmdt(g_state)==-1) perror("shmdt");
 
 

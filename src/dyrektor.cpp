@@ -163,41 +163,46 @@ namespace {
     }
 
     void menu_loop(){
-        std::cout<<"Polecenie dyrektora:  \n";
-        char choice;
+        std::cout<<"Polecenie dyrektora (1-4, q=quit):\n";
+        std::cout<<"  1 - StopFabryka (zatrzymaj stanowiska)\n";
+        std::cout<<"  2 - StopMagazyn\n";
+        std::cout<<"  3 - StopDostawcy\n";
+        std::cout<<"  4 - StopAll (zapisz stan i zakończ)\n";
+        std::cout<<"  q - Quit\n";
+        
+        std::string line;
 
         while(true){
             std::cout<< ">  ";
-            std::cin >> choice;
-
-            if(!std::cin) break;
+            if (!std::getline(std::cin, line)) break;
+            
+            // Pomiń puste linie
+            if (line.empty()) continue;
+            
+            char choice = line[0];
 
             if (choice == '1'){
+                log_raport(g_semid, "DYREKTOR", "Wysyłam StopFabryka (zatrzymanie stanowisk)");
                 send_command_to_all(Command::StopFabryka,2);
-
             }
-
             else if (choice =='2'){
+                log_raport(g_semid, "DYREKTOR", "Wysyłam StopMagazyn");
                 send_command_to_all(Command::StopMagazyn,1);
-
             }
-
             else if (choice == '3'){
-
+                log_raport(g_semid, "DYREKTOR", "Wysyłam StopDostawcy");
                 send_command_to_all(Command::StopDostawcy,4);
             }
-
             else if (choice == '4'){
+                log_raport(g_semid, "DYREKTOR", "Wysyłam StopAll (zapis stanu i zakończenie)");
                 send_command_to_all(Command::StopAll, 7);
                 break;
             }
-
             else if (choice == 'q' || choice == 'Q'){
                 break;
             }
-
             else{
-                std::cout<<"Nieznana opcja"<<std::endl;
+                std::cout<<"Nieznana opcja: '"<<choice<<"'"<<std::endl;
             }
 
         }

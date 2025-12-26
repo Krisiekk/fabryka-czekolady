@@ -2,7 +2,6 @@
 
 #include <csignal>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -95,11 +94,19 @@ void init_ipc(int capacity){
 }
 
 void load_state_from_file(){
-	std::ifstream in(g_stateFile);
-	if(!in) return;
+	// Używamy syscalli open/read/close (wymaganie 5.2)
+	int fd = open(g_stateFile.c_str(), O_RDONLY);
+	if (fd == -1) return;  // plik nie istnieje
+	
+	char buf[128];
+	ssize_t n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	
+	if (n <= 0) return;
+	buf[n] = '\0';
+	
 	int cap, a, b, c, d;
-	in>>cap>>a>>b>>c>>d;
-	if(!in) return;
+	if (sscanf(buf, "%d %d %d %d %d", &cap, &a, &b, &c, &d) != 5) return;
 
 	P_mutex(g_semid);
 
@@ -141,11 +148,21 @@ void load_state_from_file(){
 
 void save_state_to_file(){
 	P_mutex(g_semid);
-	std::ofstream out(g_stateFile, std::ios::trunc);
-	if(out){
-		out << g_state->capacity << ' ' << g_state->a << ' ' << g_state->b << ' ' << g_state->c << ' ' << g_state->d << "\n";
-
-	};
+	
+	// Używamy syscalli open/write/close (wymaganie 5.2)
+	int fd = open(g_stateFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd != -1) {
+		char buf[128];
+		int len = snprintf(buf, sizeof(buf), "%d %d %d %d %d\n",
+						   g_state->capacity, g_state->a, g_state->b, g_state->c, g_state->d);
+		if (len > 0) {
+			if (write(fd, buf, len) == -1) perror("write state");
+		}
+		close(fd);
+	} else {
+		perror("open state");
+	}
+	
 	V_mutex(g_semid);
 
 
@@ -273,7 +290,10 @@ void loop(){
 		ssize_t r = msgrcv(g_msgid,&cmd,sizeof(cmd)-sizeof(long),static_cast<long>(MsgType::CommandBroadcast),IPC_NOWAIT);
 		
 		if(r>=0){
-			if(cmd.cmd == Command::StopMagazyn ||cmd.cmd  == Command::StopAll) {
+			if(cmd.cmd == Command::StopMagazyn ||cmd.cmd  == Command::StopAll) {				const char* cmdName = (cmd.cmd == Command::StopAll) ? "StopAll" : "StopMagazyn";
+				char cmdbuf[64];
+				std::snprintf(cmdbuf, sizeof(cmdbuf), "Odebrano %s - koncze prace", cmdName);
+				log_raport(g_semid, "MAGAZYN", cmdbuf);
 				g_stop = true;
 				continue;
 			}
@@ -335,14 +355,33 @@ int main (int argc, char **argv){
 	std::snprintf(startbuf, sizeof(startbuf), "Start magazynu (capacity=%d)", capacity);
 	log_raport(g_semid, "MAGAZYN", startbuf);
 
-	std::ifstream test(g_stateFile);
-	if (test.good()) {
+	// Sprawdź czy plik stanu istnieje (syscall access)
+	if (access(g_stateFile.c_str(), F_OK) == 0) {
 		std::cout << "[MAGAZYN] wczytuje z pliku\n";
 		load_state_from_file();
-		log_raport(g_semid, "MAGAZYN", "Wczytano stan z pliku");
+		
+		
+		P_mutex(g_semid);
+		int usedUnits = g_state->a + g_state->b + 2*g_state->c + 3*g_state->d;
+		char loadbuf[128];
+		std::snprintf(loadbuf, sizeof(loadbuf), 
+			"Odtworzono stan z pliku: A=%d B=%d C=%d D=%d (zajetosc: %d/%d jednostek)",
+			g_state->a, g_state->b, g_state->c, g_state->d, usedUnits, g_state->capacity);
+		V_mutex(g_semid);
+		log_raport(g_semid, "MAGAZYN", loadbuf);
 	}
 
 	loop();
+
+	// Log przed zapisem stanu
+	P_mutex(g_semid);
+	int usedUnits = g_state->a + g_state->b + 2*g_state->c + 3*g_state->d;
+	char savebuf[128];
+	std::snprintf(savebuf, sizeof(savebuf),
+		"Zapisuje stan do pliku: A=%d B=%d C=%d D=%d (zajetosc: %d/%d jednostek)",
+		g_state->a, g_state->b, g_state->c, g_state->d, usedUnits, g_state->capacity);
+	V_mutex(g_semid);
+	log_raport(g_semid, "MAGAZYN", savebuf);
 
 	save_state_to_file();
 

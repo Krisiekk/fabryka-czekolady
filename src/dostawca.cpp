@@ -204,6 +204,12 @@ int main(int argc, char **argv){
 		int delay = (rand() % 3) + 1;  // losowa przerwa 1-3 sekundy
 		sleep(delay);
 	}
+	
+	
+	char endbuf[64];
+	std::snprintf(endbuf, sizeof(endbuf), "Dostawca %c konczy prace (pid=%d)", g_type, getpid());
+	log_raport(g_semid, "DOSTAWCA", endbuf);
+	
 	if(g_state &&shmdt(g_state)==-1) perror("shmdt");
 
 	return 0;
