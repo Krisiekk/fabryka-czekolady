@@ -65,7 +65,7 @@ key_t make_key(){
  //dolaczenie do istniejacych zasobow
 void attach_ipc() {
 	key_t key = make_key();
-	g_shmid = shmget(key,sizeof(WarehouseState),0600); // zanlezienie istniejacej pameci wspoldzielonej
+	g_shmid = shmget(key,sizeof(WarehouseState),0600); // zanleznienie istniejacej pameci wspoldzielonej
 	if(g_shmid == -1) die_perror("shmget"); 
 	g_state = static_cast<WarehouseState*>(shmat(g_shmid,nullptr,0));
 	if(g_state == reinterpret_cast<void*>(-1)) die_perror("shmat"); // podlaczenie do tej istniejacej pamieci
@@ -76,7 +76,8 @@ void attach_ipc() {
 
 };
 
-
+// Forward declaration - potrzebne w deliver_once
+void check_command();
 
 void deliver_once(int amount){
     int uPer = units_per_item(g_type);
@@ -105,7 +106,11 @@ void deliver_once(int amount){
     if (freeUnits < 10 && myUnitsNow > myTarget) {
         std::cout << "[DOSTAWCA " << g_type << "] miks OK? mam " << myUnitsNow
                   << "u > target " << myTarget << "u, czekam\n";
-        usleep(300000);
+        // Krótkie czekanie ze sprawdzaniem komend
+        for (int i = 0; i < 3 && !g_stop; i++) {
+            usleep(100000);
+            check_command();
+        }
         return;
     }
 
@@ -114,7 +119,11 @@ void deliver_once(int amount){
     if (semop(g_semid, &op, 1) == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             std::cout << "[DOSTAWCA " << g_type << "] magazyn pełny, czekam\n";
-            usleep(300000);
+            // Krótkie czekanie ze sprawdzaniem komend
+            for (int i = 0; i < 3 && !g_stop; i++) {
+                usleep(100000);
+                check_command();
+            }
             return;
         }
         perror("semop capacity");
@@ -151,23 +160,10 @@ void deliver_once(int amount){
 }
 
 void check_command() {
-    CommandMessage cmd{};
-    ssize_t r = msgrcv(
-        g_msgid,
-        &cmd,
-        sizeof(cmd) - sizeof(long),
-        static_cast<long>(MsgType::CommandBroadcast),
-        IPC_NOWAIT
-    );
+    Command cmd = ::check_command(g_msgid);  // używa PID jako mtype
 
-    if (r == -1) {
-        if (errno == ENOMSG) return;
-        perror("msgrcv command");
-        return;
-    }
-
-    if (cmd.cmd == Command::StopDostawcy || cmd.cmd == Command::StopAll) {
-        g_stop = true;
+    if (cmd == Command::StopDostawcy || cmd == Command::StopAll) {
+        g_stop = 1;
     }
 }
 	
@@ -199,10 +195,20 @@ int main(int argc, char **argv){
 	srand(static_cast<unsigned>(time(nullptr)) ^ getpid());  // seed dla losowych przerw
 
 	while(!g_stop){
+		check_command();  
+		if (g_stop) break;
+		
 		deliver_once(amount);
-		check_command();
+		
+		check_command();  
+		if (g_stop) break;
+		
+		
 		int delay = (rand() % 3) + 1;  // losowa przerwa 1-3 sekundy
-		sleep(delay);
+		for (int i = 0; i < delay * 10 && !g_stop; i++) {
+			usleep(100000);  
+			check_command();
+		}
 	}
 	
 	

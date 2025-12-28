@@ -114,23 +114,10 @@ namespace {
 	}
 
 	void check_command() {
-    CommandMessage cmd{};
-    ssize_t r = msgrcv(
-        g_msgid,
-        &cmd,
-        sizeof(cmd) - sizeof(long),
-        static_cast<long>(MsgType::CommandBroadcast),
-        IPC_NOWAIT
-    );
+    Command cmd = ::check_command(g_msgid);  // używa PID jako mtype
 
-    if (r == -1) {
-        if (errno == ENOMSG) return;
-        perror("msgrcv command");
-        return;
-    }
-
-    if (cmd.cmd == Command::StopFabryka || cmd.cmd == Command::StopAll) {
-        g_stop = true;
+    if (cmd == Command::StopFabryka || cmd == Command::StopAll) {
+        g_stop = 1;
     }
 }
 

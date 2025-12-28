@@ -66,20 +66,33 @@ namespace {
 
     }
 
-    void send_command(Command cmd){
+    // Wysyła komendę do konkretnego procesu (mtype = pid)
+    void send_command_to_pid(Command cmd, pid_t pid){
         CommandMessage msg{};
-        msg.mtype = static_cast<long>(MsgType::CommandBroadcast);
-        msg.cmd =cmd;
-        if(msgsnd(g_msgid,&msg,sizeof(msg)-sizeof(long),0)==-1){
+        msg.mtype = static_cast<long>(pid);  // mtype = PID odbiorcy
+        msg.cmd = cmd;
+        if(msgsnd(g_msgid, &msg, sizeof(msg)-sizeof(long), 0) == -1){
             perror("msgsnd command");
         }
     }
 
-    void send_command_to_all(Command cmd, int count) {
-    for (int i = 0; i < count; ++i) {
-        send_command(cmd);
+    // Wysyła komendę do zakresu procesów (indeksy w g_children)
+    void send_command_to_range(Command cmd, size_t from, size_t to) {
+        for (size_t i = from; i < to && i < g_children.size(); ++i) {
+            if (g_children[i] > 0) {
+                send_command_to_pid(cmd, g_children[i]);
+            }
+        }
     }
-}
+
+    // Wysyła komendę do wszystkich procesów
+    void send_command_to_all(Command cmd) {
+        for (pid_t pid : g_children) {
+            if (pid > 0) {
+                send_command_to_pid(cmd, pid);
+            }
+        }
+    }
 
     void remove_ipcs(){
         if(g_msgid!=-1)msgctl(g_msgid,IPC_RMID,nullptr);
@@ -102,8 +115,8 @@ namespace {
 
     // Graceful shutdown z grace period
     void graceful_shutdown() {
-        // 1) Wyślij StopAll do wszystkich procesów (7 = 1 magazyn + 4 dostawców + 2 stanowiska)
-        send_command_to_all(Command::StopAll, 7);
+        // 1) Wyślij StopAll do wszystkich procesów (targetowane per-PID)
+        send_command_to_all(Command::StopAll);
         
         // 2) Grace period: czekaj do 5 sekund aż procesy same się zakończą
         std::vector<bool> reaped(g_children.size(), false);
@@ -181,21 +194,22 @@ namespace {
             
             char choice = line[0];
 
+            // g_children: [0]=magazyn, [1-4]=dostawcy A,B,C,D, [5-6]=stanowiska 1,2
             if (choice == '1'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopFabryka (zatrzymanie stanowisk)");
-                send_command_to_all(Command::StopFabryka,2);
+                send_command_to_range(Command::StopFabryka, 5, 7);  // stanowiska
             }
             else if (choice =='2'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopMagazyn");
-                send_command_to_all(Command::StopMagazyn,1);
+                send_command_to_pid(Command::StopMagazyn, g_children[0]);  // magazyn
             }
             else if (choice == '3'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopDostawcy");
-                send_command_to_all(Command::StopDostawcy,4);
+                send_command_to_range(Command::StopDostawcy, 1, 5);  // dostawcy
             }
             else if (choice == '4'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopAll (zapis stanu i zakończenie)");
-                send_command_to_all(Command::StopAll, 7);
+                send_command_to_all(Command::StopAll);
                 break;
             }
             else if (choice == 'q' || choice == 'Q'){

@@ -205,4 +205,16 @@ inline void setup_sigaction(void (*handler)(int)) {
 	}
 }
 
+// Sprawdzenie czy przyszła komenda dla tego procesu (non-blocking)
+// Używa getpid() jako mtype - każdy proces nasłuchuje na swoim PID
+inline Command check_command(int msqid) {
+	CommandMessage msg{};
+	// Nasłuchuj na wiadomości z mtype == PID tego procesu (non-blocking)
+	ssize_t ret = msgrcv(msqid, &msg, sizeof(msg) - sizeof(long), getpid(), IPC_NOWAIT);
+	if (ret != -1) {
+		return msg.cmd;
+	}
+	return Command::None;
+}
+
 #endif  // COMMON_H

@@ -286,25 +286,21 @@ void loop(){
 	while(!g_stop){
 
 
-		CommandMessage cmd{};
-		ssize_t r = msgrcv(g_msgid,&cmd,sizeof(cmd)-sizeof(long),static_cast<long>(MsgType::CommandBroadcast),IPC_NOWAIT);
+		// Sprawdź komendy używając PID jako mtype
+		Command cmd = check_command(g_msgid);
 		
-		if(r>=0){
-			if(cmd.cmd == Command::StopMagazyn ||cmd.cmd  == Command::StopAll) {				const char* cmdName = (cmd.cmd == Command::StopAll) ? "StopAll" : "StopMagazyn";
-				char cmdbuf[64];
-				std::snprintf(cmdbuf, sizeof(cmdbuf), "Odebrano %s - koncze prace", cmdName);
-				log_raport(g_semid, "MAGAZYN", cmdbuf);
-				g_stop = true;
-				continue;
-			}
-
-		}	else if (errno !=ENOMSG){
-				perror("msgrcv command");
-			}
+		if(cmd == Command::StopMagazyn || cmd == Command::StopAll) {
+			const char* cmdName = (cmd == Command::StopAll) ? "StopAll" : "StopMagazyn";
+			char cmdbuf[64];
+			std::snprintf(cmdbuf, sizeof(cmdbuf), "Odebrano %s - koncze prace", cmdName);
+			log_raport(g_semid, "MAGAZYN", cmdbuf);
+			g_stop = 1;
+			continue;
+		}
 
 
 		WorkerRequestMessage req{};
-		r = msgrcv(g_msgid,&req,sizeof(req)-sizeof(long),static_cast<long>(MsgType::WorkerRequest),IPC_NOWAIT);
+		ssize_t r = msgrcv(g_msgid,&req,sizeof(req)-sizeof(long),static_cast<long>(MsgType::WorkerRequest),IPC_NOWAIT);
 
 		if(r>=0){
 			process_worker_request(req);
