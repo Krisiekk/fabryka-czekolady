@@ -59,3 +59,7 @@ mkdir build
 cd build
 cmake ..
 make
+cd build
+./dyrektor <N>
+# przykład:
+./dyrektor 100
