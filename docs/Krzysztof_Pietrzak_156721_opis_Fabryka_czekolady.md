@@ -21,12 +21,20 @@ Do komunikacji i synchronizacji zostaną wykorzystane:
 
 | Proces | Zadanie | Funkcje systemowe |
 |--------|---------|-------------------|
-| `dyrektor` | tworzy procesy i steruje nimi | `fork()`, `exec()`, `wait()` |
-| `magazyn` | trzyma składniki w pamięci dzielonej | `shmget()`, `semget()` |
-| `dostawca_A/B/C/D` | dostarcza składniki | `fork()`, `exec()`, `shmget()` |
-| `stanowisko_1` | produkuje czekoladę typu 1 | `semop()`, `shmget()` |
-| `stanowisko_2` | produkuje czekoladę typu 2 | `semop()`, `shmget()` |
-| (opcjonalnie) `raport` | zapis do pliku `.txt` | `open()`, `write()` |
+| `dyrektor` | tworzy procesy i steruje nimi | `fork()`, `exec()`, `wait()`, `kill()` |
+| `magazyn` | trzyma składniki w pamięci dzielonej | `shmget()`, `semget()`, `msgrcv()` |
+| `dostawca_A/B/C/D` | dostarcza składniki | `shmget()`, `semop()`, `msgsnd()` |
+| `stanowisko_1` | produkuje czekoladę typu 1 | `semop()`, `shmget()`, `msgsnd()` |
+| `stanowisko_2` | produkuje czekoladę typu 2 | `semop()`, `shmget()`, `msgsnd()` |
+
+### Mapowanie poleceń dyrektora
+
+| Polecenie | Komenda | Opis |
+|-----------|---------|------|
+| **1** | `StopFabryka` | Zatrzymuje stanowiska produkcyjne (1 i 2) |
+| **2** | `StopMagazyn` | Zatrzymuje proces magazynu |
+| **3** | `StopDostawcy` | Zatrzymuje wszystkich dostawców (A, B, C, D) |
+| **4** | `StopAll` | Zapisuje stan magazynu i kończy wszystkie procesy |
 
 ---
 
@@ -420,21 +428,73 @@ Każdy link prowadzi do konkretnego pliku oraz zakresu linii w repozytorium GitH
 
 ---
 
+### c) FIFO (Named Pipes)  
+*(mkfifo(), open(), read(), write(), close(), unlink())*
 
+**Nie dotyczy** – w projekcie wykorzystano kolejki komunikatów System V zamiast FIFO.
 
+---
 
+### f) Wątki POSIX  
+*(pthread_create(), pthread_join(), pthread_exit(), pthread_mutex_*, pthread_cond_*)*
 
-┌─────────────┐
-│  DYREKTOR   │ ← Ty wpisujesz komendy 1-4
-└──────┬──────┘
-       │ fork()+exec()
-       ▼
-┌──────────────┐    kolejka msg    ┌─────────────┐
-│   MAGAZYN    │◄─────────────────►│  DOSTAWCA   │ x4
-│              │    semafory       │  (A,B,C,D)  │
-│  pamięć shm  │◄─────────────────►└─────────────┘
-│              │    
-└──────────────┘    kolejka msg    ┌─────────────┐
-       ▲        ◄─────────────────►│ STANOWISKO  │ x2
-       │           semafory        │   (1, 2)    │
-       └───────────────────────────┴─────────────┘
+**Nie dotyczy** – projekt opiera się na wielu procesach (`fork()` + `exec()`), nie na wątkach.
+
+---
+
+### g) Gniazda (Sockets)  
+*(socket(), bind(), listen(), accept(), connect(), send(), recv())*
+
+**Nie dotyczy** – komunikacja między procesami realizowana jest przez IPC System V.
+
+---
+
+## 7. Problemy napotkane podczas realizacji projektu
+
+1. **Deadlock przy pełnym magazynie** – stanowiska blokowały się na semaforach czekając na surowce, które nie mogły być dostarczone. Rozwiązanie: `try_P()` z `IPC_NOWAIT` i rollback.
+
+2. **Komenda StopDostawcy nie docierała do wszystkich** – broadcast przez `mtype=1` powodował, że tylko jeden proces odbierał wiadomość. Rozwiązanie: per-PID targeting (`mtype = pid`).
+
+3. **Race condition przy zapisie logów** – jednoczesny zapis przez wiele procesów powodował mieszanie się linii. Rozwiązanie: dodatkowy semafor `SEM_RAPORT`.
+
+4. **Procesy nie reagowały na sygnały podczas `sleep()`** – użycie `signal()` nie przerywało blokujących wywołań. Rozwiązanie: `sigaction()` bez flagi `SA_RESTART`.
+
+5. **Niepoprawny rozmiar bufora w `msgrcv()`** – przekazywanie `sizeof(msg.cmd)` zamiast `sizeof(msg) - sizeof(long)` powodowało błędy odbioru. Rozwiązanie: poprawna kalkulacja rozmiaru.
+
+---
+
+## 8. Architektura systemu
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         DYREKTOR                                │
+│                    (sterowanie fabryki)                         │
+│                  Ty wpisujesz komendy 1-4                       │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+         ┌─────────────────┼─────────────────┐
+         │ fork()+exec()   │ msgsnd()        │ kill(SIGTERM)
+         │                 │ (komendy)       │ (timeout)
+         ▼                 ▼                 ▼
+┌──────────────┐    kolejka msg    ┌─────────────────────────────┐
+│   MAGAZYN    │◄─────────────────►│       DOSTAWCY (x4)         │
+│              │                   │     A    B    C    D        │
+│  Stan:       │    semafory       │                             │
+│  - A,B,C,D   │◄─────────────────►│  semop() - dodaj surowce    │
+│  - capacity  │    (SEM_MUTEX,    └─────────────────────────────┘
+│              │     SEM_A/B/C/D,
+│  pamięć shm  │     SEM_CAPACITY)
+│              │
+└──────────────┘    kolejka msg    ┌─────────────────────────────┐
+       ▲        ◄─────────────────►│     STANOWISKA (x2)         │
+       │           semafory        │        1          2         │
+       │                           │                             │
+       │                           │  Typ1: A+B+C    Typ2: A+B+D │
+       └───────────────────────────┴─────────────────────────────┘
+
+Komunikacja:
+  - kolejka msg: polecenia dyrektora, żądania stanowisk, odpowiedzi magazynu
+  - semafory: synchronizacja dostępu do zasobów (mutex, pojemność, surowce)
+  - pamięć shm: stan magazynu (ilości A,B,C,D + capacity)
+  - sygnały: SIGTERM przy graceful shutdown (timeout)
+```
