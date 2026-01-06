@@ -76,7 +76,7 @@ void attach_ipc() {
 
 };
 
-// Forward declaration - potrzebne w deliver_once
+
 void check_command();
 
 void deliver_once(int amount){
@@ -182,12 +182,26 @@ int main(int argc, char **argv){
 	if(argc<2){
 		std::cerr<<"Uzycie dostawca <A|B|C|D> [amount] \n";
 		return 1;
-
 	}
 
+
 	g_type = argv[1][0];
-	int amount = (argc>= 3)? std::atoi(argv[2]):1;
-	if(amount<=0) amount =1;
+	if (g_type != 'A' && g_type != 'B' && g_type != 'C' && g_type != 'D') {
+		std::cerr << "Błąd: typ dostawcy musi być A, B, C lub D.\n";
+		return 1;
+	}
+	
+	// Walidacja amount z strtol
+	int amount = 1;
+	if (argc >= 3) {
+		char *endptr = nullptr;
+		long val = std::strtol(argv[2], &endptr, 10);
+		if (endptr == argv[2] || *endptr != '\0' || val <= 0 || val > 100) {
+			std::cerr << "Błąd: amount musi być liczbą 1-100.\n";
+			return 1;
+		}
+		amount = static_cast<int>(val);
+	}
 	setup_sigaction(handle_signal);
 
 	attach_ipc();

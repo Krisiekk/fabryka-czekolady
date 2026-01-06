@@ -129,12 +129,17 @@ namespace {
 int main (int argc, char **argv){
 
 	if(argc<2){
-		std::cerr<<"Uzycie stanowisko <1/2> \n";
+		std::cerr<<"Uzycie stanowisko <1|2> \n";
 		return 1;
 	}
 
-	g_workerType = std::atoi(argv[1]);
-	if(g_workerType !=1 && g_workerType !=2 ) g_workerType=1;
+	char *endptr = nullptr;
+	long val = std::strtol(argv[1], &endptr, 10);
+	if (endptr == argv[1] || *endptr != '\0' || (val != 1 && val != 2)) {
+		std::cerr << "Błąd: typ stanowiska musi być 1 lub 2.\n";
+		return 1;
+	}
+	g_workerType = static_cast<int>(val);
 
 	srand(static_cast<unsigned>(time(nullptr)) ^ getpid());
 	setup_sigaction(handle_signal);

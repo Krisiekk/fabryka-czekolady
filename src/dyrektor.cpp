@@ -66,33 +66,20 @@ namespace {
 
     }
 
-    // Wysyła komendę do konkretnego procesu (mtype = pid)
-    void send_command_to_pid(Command cmd, pid_t pid){
+    void send_command(Command cmd){
         CommandMessage msg{};
-        msg.mtype = static_cast<long>(pid);  // mtype = PID odbiorcy
-        msg.cmd = cmd;
-        if(msgsnd(g_msgid, &msg, sizeof(msg)-sizeof(long), 0) == -1){
+        msg.mtype = static_cast<long>(MsgType::CommandBroadcast);
+        msg.cmd =cmd;
+        if(msgsnd(g_msgid,&msg,sizeof(msg)-sizeof(long),0)==-1){
             perror("msgsnd command");
         }
     }
 
-    // Wysyła komendę do zakresu procesów (indeksy w g_children)
-    void send_command_to_range(Command cmd, size_t from, size_t to) {
-        for (size_t i = from; i < to && i < g_children.size(); ++i) {
-            if (g_children[i] > 0) {
-                send_command_to_pid(cmd, g_children[i]);
-            }
-        }
+    void send_command_to_all(Command cmd, int count) {
+    for (int i = 0; i < count; ++i) {
+        send_command(cmd);
     }
-
-    // Wysyła komendę do wszystkich procesów
-    void send_command_to_all(Command cmd) {
-        for (pid_t pid : g_children) {
-            if (pid > 0) {
-                send_command_to_pid(cmd, pid);
-            }
-        }
-    }
+}
 
     void remove_ipcs(){
         if(g_msgid!=-1)msgctl(g_msgid,IPC_RMID,nullptr);
@@ -115,8 +102,8 @@ namespace {
 
     // Graceful shutdown z grace period
     void graceful_shutdown() {
-        // 1) Wyślij StopAll do wszystkich procesów (targetowane per-PID)
-        send_command_to_all(Command::StopAll);
+        // 1) Wyślij StopAll do wszystkich procesów (7 = 1 magazyn + 4 dostawców + 2 stanowiska)
+        send_command_to_all(Command::StopAll, 7);
         
         // 2) Grace period: czekaj do 5 sekund aż procesy same się zakończą
         std::vector<bool> reaped(g_children.size(), false);
@@ -194,22 +181,21 @@ namespace {
             
             char choice = line[0];
 
-            // g_children: [0]=magazyn, [1-4]=dostawcy A,B,C,D, [5-6]=stanowiska 1,2
             if (choice == '1'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopFabryka (zatrzymanie stanowisk)");
-                send_command_to_range(Command::StopFabryka, 5, 7);  // stanowiska
+                send_command_to_all(Command::StopFabryka,2);
             }
             else if (choice =='2'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopMagazyn");
-                send_command_to_pid(Command::StopMagazyn, g_children[0]);  // magazyn
+                send_command_to_all(Command::StopMagazyn,1);
             }
             else if (choice == '3'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopDostawcy");
-                send_command_to_range(Command::StopDostawcy, 1, 5);  // dostawcy
+                send_command_to_all(Command::StopDostawcy,4);
             }
             else if (choice == '4'){
                 log_raport(g_semid, "DYREKTOR", "Wysyłam StopAll (zapis stanu i zakończenie)");
-                send_command_to_all(Command::StopAll);
+                send_command_to_all(Command::StopAll, 7);
                 break;
             }
             else if (choice == 'q' || choice == 'Q'){
@@ -228,10 +214,23 @@ namespace {
 
 int main( int argc, char **argv){
     int capacity = kDefaultCapacity;
-    if(argc >1) capacity =std::atoi(argv[1]);
-    if(capacity<=0) capacity =kDefaultCapacity;
+    if(argc > 1) {
+        char *endptr = nullptr;
+        long val = std::strtol(argv[1], &endptr, 10);
+        if (endptr == argv[1] || *endptr != '\0') {
+            std::cerr << "Błąd: '" << argv[1] << "' nie jest poprawną liczbą.\n";
+            std::cerr << "Użycie: " << argv[0] << " [capacity]\n";
+            return 1;
+        }
+        if (val <= 0 || val > 10000) {
+            std::cerr << "Błąd: capacity musi być w zakresie 1-10000.\n";
+            return 1;
+        }
+        capacity = static_cast<int>(val);
+    }
 
     setup_sigaction(handle_signal);
+    ensure_ipc_key();  // Auto-tworzenie pliku ipc.key
 
     start_processes(capacity);
 

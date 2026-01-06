@@ -21,6 +21,16 @@
 constexpr const char *kIpcKeyPath="./ipc.key";
 constexpr int kProjId = 0x42;
 
+// Automatyczne tworzenie pliku ipc.key jeśli nie istnieje
+inline void ensure_ipc_key() {
+	int fd = open(kIpcKeyPath, O_CREAT | O_WRONLY, 0600);
+	if (fd == -1) {
+		perror("open ipc.key");
+	} else {
+		close(fd);
+	}
+}
+
 // domyslna pojemnosc magazunu
 constexpr int kDefaultCapacity = 100;
 
@@ -142,7 +152,6 @@ inline void V(int semid, int semnum, int delta = 1) {
 constexpr const char *kRaportPath = "raport.txt";
 
 // Logowanie do wspólnego pliku z ochroną semaforem SEM_RAPORT
-// Używa syscalli open/write/close (wymaganie 5.2 - obsługa plików)
 inline void log_raport(int semid, const char* proces, const char* msg) {
 	// Używamy osobnego semafora SEM_RAPORT (nie SEM_MUTEX) żeby nie blokować całego systemu podczas I/O
 	if (sem_down(semid, SEM_RAPORT, 1, SEM_UNDO) == -1) {

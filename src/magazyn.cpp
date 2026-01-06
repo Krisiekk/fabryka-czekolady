@@ -340,9 +340,22 @@ void loop(){
 int main (int argc, char **argv){
 
 	int capacity = kDefaultCapacity;
-	if(argc>1) capacity =std::atoi(argv[1]);
+	if(argc > 1) {
+		char *endptr = nullptr;
+		long val = std::strtol(argv[1], &endptr, 10);
+		if (endptr == argv[1] || *endptr != '\0') {
+			std::cerr << "Błąd: '" << argv[1] << "' nie jest poprawną liczbą.\n";
+			return 1;
+		}
+		if (val <= 0 || val > 10000) {
+			std::cerr << "Błąd: capacity musi być w zakresie 1-10000.\n";
+			return 1;
+		}
+		capacity = static_cast<int>(val);
+	}
 
 	setup_sigaction(handle_signal);
+	ensure_ipc_key();  // Auto-tworzenie pliku ipc.key
 
 	init_ipc(capacity);
 
