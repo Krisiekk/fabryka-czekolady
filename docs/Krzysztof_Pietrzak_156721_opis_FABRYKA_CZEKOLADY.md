@@ -359,7 +359,7 @@ kończące pracę fabryki z zapisem stanu magazynu.
 
 #### Fragment logu z przebiegu testu:
 
-```
+
 [16:19:42] MAGAZYN: Start magazynu (capacity=100)
 [16:19:43] DOSTAWCA: Dostarczono 1 x B (stan: A=0 B=1 C=0 D=0)
 [16:19:43] DOSTAWCA: Dostarczono 1 x A (stan: A=1 B=1 C=0 D=0)
@@ -383,7 +383,7 @@ kończące pracę fabryki z zapisem stanu magazynu.
 [16:19:54] DOSTAWCA: Dostawca B konczy prace (pid=3622)
 [16:19:54] DOSTAWCA: Dostawca C konczy prace (pid=3623)
 [16:19:54] DOSTAWCA: Dostawca D konczy prace (pid=3624)
-```
+
 
 
 ### ✔ Test 7 – zatrzymanie magazynu (StopMagazyn)
@@ -407,7 +407,7 @@ kończące pracę fabryki z zapisem stanu magazynu.
 
 #### Fragment logu z przebiegu testu:
 
-```
+
 [16:20:40] MAGAZYN: Start magazynu (capacity=100)
 [16:20:41] DOSTAWCA: Dostarczono 1 x A (stan: A=1 B=1 C=1 D=0)
 [16:20:41] DOSTAWCA: Dostarczono 1 x D (stan: A=1 B=1 C=1 D=1)
@@ -431,7 +431,7 @@ kończące pracę fabryki z zapisem stanu magazynu.
 [16:20:50] DOSTAWCA: Dostawca D konczy prace (pid=3857)
 [16:20:51] STANOWISKO: Stanowisko 2 konczy prace (pid=3859)
 [16:20:52] STANOWISKO: Stanowisko 1 konczy prace (pid=3858)
-```
+
 
 
 ## 4. Struktura repozytorium
@@ -469,13 +469,13 @@ fabryka-czekolady/
 *(creat(), open(), close(), read(), write(), unlink())*
 
 - **Zapis raportu/logów do pliku tekstowego (`open`, `write`, `close`)**  
-  → [include/common.h#L154](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/include/common.h#L154)
+  → [include/common.h#L214](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/include/common.h#L214)
 
 - **Odczyt stanu magazynu z pliku (`open`, `read`, `close`)**  
-  → [src/magazyn.cpp#L96](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/magazyn.cpp#L96)
+  → [src/magazyn.cpp#L140](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L140)
 
 - **Zapis stanu magazynu do pliku (`open`, `write`, `close`)**  
-  → [src/magazyn.cpp#L149](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/magazyn.cpp#L149)
+  → [src/magazyn.cpp#L202](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L202)
 
 ---
 
@@ -483,10 +483,10 @@ fabryka-czekolady/
 *(fork(), exec(), exit(), wait())*
 
 - **Uruchamianie procesów potomnych (magazyn, dostawcy, stanowiska)**  
-  → [src/dyrektor.cpp#L29](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/dyrektor.cpp#L29)
+  → [src/dyrektor.cpp#L57](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L57)
 
 - **Oczekiwanie na zakończenie procesów potomnych (`waitpid`)**  
-  → [src/dyrektor.cpp#L105](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/dyrektor.cpp#L105)
+  → [src/dyrektor.cpp#L166](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L166)
 
 ---
 
@@ -494,10 +494,10 @@ fabryka-czekolady/
 *(kill(), sigaction())*
 
 - **Rejestracja obsługi sygnałów (`sigaction`)**  
-  → [include/common.h#L188](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/include/common.h#L188)
+  → [include/common.h#L258](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/include/common.h#L258)
 
 - **Wysyłanie sygnałów do procesów (`kill`)**  
-  → [src/dyrektor.cpp#L150](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/dyrektor.cpp#L150)
+  → [src/dyrektor.cpp#L224](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L224)
 
 ---
 
@@ -505,10 +505,10 @@ fabryka-czekolady/
 *(ftok(), semget(), semctl(), semop())*
 
 - **Tworzenie i inicjalizacja semaforów System V**  
-  → [src/magazyn.cpp#L39](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/magazyn.cpp#L39)
+  → [src/magazyn.cpp#L84](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L84)
 
 - **Operacje P/V na semaforach (`semop`)**  
-  → [include/common.h#L133](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/include/common.h#L133)
+  → [include/common.h#L160](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/include/common.h#L160)
 
 ---
 
@@ -516,11 +516,11 @@ fabryka-czekolady/
 *(ftok(), shmget(), shmat(), shmdt(), shmctl())*
 
 - **Tworzenie i dołączanie pamięci dzielonej**  
-  → [src/magazyn.cpp#L44](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/magazyn.cpp#L44)
+  → [src/magazyn.cpp#L71](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L71)
 
 - **Odłączanie i usuwanie pamięci dzielonej (`shmdt`, `shmctl`)**  
-  → [src/dyrektor.cpp#L97](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/dyrektor.cpp#L97)  
-  → [src/stanowisko.cpp#L157](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/stanowisko.cpp#L157)
+  → [src/dyrektor.cpp#L162](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L162)  
+  → [src/stanowisko.cpp#L209](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/stanowisko.cpp#L209)
 
 ---
 
@@ -528,14 +528,14 @@ fabryka-czekolady/
 *(ftok(), msgget(), msgsnd(), msgrcv(), msgctl())*
 
 - **Tworzenie kolejki komunikatów i odbiór poleceń**  
-  → [src/magazyn.cpp#L52](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/magazyn.cpp#L52)  
-  → [src/magazyn.cpp#L303](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/magazyn.cpp#L303)
+  → [src/magazyn.cpp#L80](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L80)  
+  → [src/magazyn.cpp#L392](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L392)
 
 - **Wysyłanie komunikatów (żądania stanowisk / polecenia dyrektora)**  
-  → [src/stanowisko.cpp#L69](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/stanowisko.cpp#L69)
+  → [src/stanowisko.cpp#L105](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/stanowisko.cpp#L105)
 
 - **Usuwanie kolejki komunikatów (`msgctl(IPC_RMID)`)**  
-  → [src/dyrektor.cpp#L98](https://github.com/Krisiekk/fabryka-czekolady/blob/8c4406e1f4800a77079abbd7ea8eb48b2ce23343/src/dyrektor.cpp#L98)
+  → [src/dyrektor.cpp#L160](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L160)
 
 ---
 
