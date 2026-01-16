@@ -1,4 +1,4 @@
-# Fabryka Czekolady – opis projektu  
+# Fabryka Czekolady – raport końcowy  
 **Autor:** Krzysztof Pietrzak  
 **Nr albumu:** 156721  
 **Nazwa tematu:** FABRYKA_CZEKOLADY  
@@ -14,6 +14,26 @@ Do komunikacji i synchronizacji zostaną wykorzystane:
 - semafory (`ftok()`, `semget()`, `semop()`, `semctl()`)
 - sygnały (`signal()`, `sigaction()`, `kill()`, `raise()`)
 - kolejki komunikatów System V (`ftok()`, `msgget()`, `msgsnd()`, `msgrcv()`, `msgctl()`)
+
+### Jak uruchomić
+
+```bash
+cd build
+cmake .. && make
+./dyrektor [capacity]
+```
+
+**Parametry:**
+- `capacity` (opcjonalny) – pojemność magazynu w jednostkach (domyślnie: 100)
+
+**Walidacja danych wejściowych (pkt 4.1.b):**
+- `capacity` musi być liczbą całkowitą w zakresie 1–10000
+- użyto `strtol()` z pełną kontrolą błędów (niepoprawny format, przepełnienie)
+- przy błędzie program wyświetla komunikat i kończy pracę z kodem 1
+
+### Interpretacja „maksymalnie dużo podzespołów"
+
+Zgodnie z treścią tematu, dostawcy działają **asynchronicznie** i próbują dostarczać surowce w sposób ciągły (losowe opóźnienia między dostawami). Magazyn przyjmuje wszystkie dostawy, dopóki pozwala na to `capacity`. Gdy magazyn jest pełny, dostawca **blokuje się na semaforze `SEM_CAPACITY`** i czeka, aż stanowisko produkcyjne pobierze surowce (zwalniając miejsce). Dzięki temu system dąży do maksymalnego zapełnienia magazynu bez przekraczania limitu pojemności.
 
 ---
 
@@ -35,6 +55,9 @@ Do komunikacji i synchronizacji zostaną wykorzystane:
 | **2** | `StopMagazyn` | Zatrzymuje proces magazynu |
 | **3** | `StopDostawcy` | Zatrzymuje wszystkich dostawców (A, B, C, D) |
 | **4** | `StopAll` | Zapisuje stan magazynu i kończy wszystkie procesy |
+
+**Mechanizm dostarczania poleceń:**  
+Komendy są wysyłane przez kolejkę komunikatów System V (`msgsnd`). Dyrektor wysyła wiadomość z `mtype = PID` procesu docelowego (per-PID targeting). Każdy proces potomny w swojej pętli głównej wywołuje `check_command()`, która wykonuje nieblokujące `msgrcv(..., getpid(), IPC_NOWAIT)`. Po odebraniu komendy proces ustawia flagę `g_stop = 1` i wychodzi z pętli, wykonując cleanup (np. magazyn zapisuje stan do pliku).
 
 ---
 
@@ -316,6 +339,100 @@ kończące pracę fabryki z zapisem stanu magazynu.
 [16:22:02] STANOWISKO: Stanowisko 2 konczy prace
 
 
+### ✔ Test 6 – zatrzymanie stanowisk produkcyjnych (StopFabryka)
+
+**Cel:** Weryfikacja komendy **1** (`StopFabryka`) – zatrzymanie stanowisk produkcyjnych przy kontynuacji pracy dostawców i magazynu.
+
+**Opis:** Uruchomiono pełną symulację. Po kilku sekundach dyrektor wysłał komendę `StopFabryka`, a następnie `StopAll`.
+
+**Oczekiwany wynik:**
+- po `StopFabryka` stanowiska 1 i 2 kończą pracę
+- dostawcy i magazyn kontynuują działanie
+- po `StopAll` wszystkie procesy kończą pracę
+
+**Rzeczywisty wynik:**
+- stanowiska zakończyły pracę po odebraniu `StopFabryka`
+- dostawcy nadal dostarczali surowce do magazynu
+- `StopAll` zakończyło pozostałe procesy poprawnie
+
+**Status:** ✔ ZALICZONY
+
+#### Fragment logu z przebiegu testu:
+
+```
+[16:19:42] MAGAZYN: Start magazynu (capacity=100)
+[16:19:43] DOSTAWCA: Dostarczono 1 x B (stan: A=0 B=1 C=0 D=0)
+[16:19:43] DOSTAWCA: Dostarczono 1 x A (stan: A=1 B=1 C=0 D=0)
+[16:19:44] MAGAZYN: Żądanie od stanowiska 1 (pid=3625): A=1 B=1 C=1 D=0
+[16:19:44] MAGAZYN: Wydano surowce dla stanowiska 1 (pid=3625)
+[16:19:44] STANOWISKO: Stanowisko 1 wyprodukowano czekolade (pid=3625)
+[16:19:46] MAGAZYN: Żądanie od stanowiska 2 (pid=3626): A=1 B=1 C=0 D=1
+[16:19:46] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=3626)
+[16:19:46] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=3626)
+[16:19:47] DYREKTOR: Wysyłam StopFabryka (zatrzymanie stanowisk)
+[16:19:47] STANOWISKO: Stanowisko 1 wyprodukowano czekolade (pid=3625)
+[16:19:48] STANOWISKO: Stanowisko 1 konczy prace (pid=3625)
+[16:19:49] STANOWISKO: Stanowisko 2 konczy prace (pid=3626)
+[16:19:49] DOSTAWCA: Dostarczono 1 x D (stan: A=1 B=1 C=1 D=2)
+[16:19:50] DOSTAWCA: Dostarczono 1 x B (stan: A=2 B=2 C=1 D=2)
+[16:19:51] DOSTAWCA: Dostarczono 1 x C (stan: A=2 B=2 C=3 D=3)
+[16:19:53] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
+[16:19:53] MAGAZYN: Odebrano StopAll - koncze prace
+[16:19:53] MAGAZYN: Zapisuje stan do pliku: A=4 B=3 C=4 D=3 (zajetosc: 24/100 jednostek)
+[16:19:54] DOSTAWCA: Dostawca A konczy prace (pid=3621)
+[16:19:54] DOSTAWCA: Dostawca B konczy prace (pid=3622)
+[16:19:54] DOSTAWCA: Dostawca C konczy prace (pid=3623)
+[16:19:54] DOSTAWCA: Dostawca D konczy prace (pid=3624)
+```
+
+
+### ✔ Test 7 – zatrzymanie magazynu (StopMagazyn)
+
+**Cel:** Weryfikacja komendy **2** (`StopMagazyn`) – zatrzymanie procesu magazynu.
+
+**Opis:** Uruchomiono pełną symulację. Po kilku sekundach dyrektor wysłał komendę `StopMagazyn`, a następnie `StopAll`.
+
+**Oczekiwany wynik:**
+- po `StopMagazyn` magazyn kończy pracę (zapisuje stan do pliku)
+- dostawcy i stanowiska tracą możliwość komunikacji z magazynem
+- po `StopAll` wszystkie procesy kończą pracę
+
+**Rzeczywisty wynik:**
+- magazyn zakończył pracę i zapisał stan do pliku
+- dostawcy kontynuowali dostawy (aktualizując stan w pamięci dzielonej)
+- stanowiska nie mogły uzyskać odpowiedzi od magazynu (blokowanie na msgrcv)
+- `StopAll` zakończyło wszystkie procesy poprawnie
+
+**Status:** ✔ ZALICZONY
+
+#### Fragment logu z przebiegu testu:
+
+```
+[16:20:40] MAGAZYN: Start magazynu (capacity=100)
+[16:20:41] DOSTAWCA: Dostarczono 1 x A (stan: A=1 B=1 C=1 D=0)
+[16:20:41] DOSTAWCA: Dostarczono 1 x D (stan: A=1 B=1 C=1 D=1)
+[16:20:42] MAGAZYN: Żądanie od stanowiska 2 (pid=3859): A=1 B=1 C=0 D=1
+[16:20:42] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=3859)
+[16:20:42] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=3859)
+[16:20:45] MAGAZYN: Żądanie od stanowiska 2 (pid=3859): A=1 B=1 C=0 D=1
+[16:20:45] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=3859)
+[16:20:45] DYREKTOR: Wysyłam StopMagazyn
+[16:20:45] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=3859)
+[16:20:46] MAGAZYN: Odebrano StopMagazyn - koncze prace
+[16:20:46] MAGAZYN: Zapisuje stan do pliku: A=1 B=0 C=4 D=1 (zajetosc: 12/100 jednostek)
+[16:20:47] DOSTAWCA: Dostarczono 1 x D (stan: A=2 B=0 C=4 D=2)
+[16:20:47] DOSTAWCA: Dostarczono 1 x A (stan: A=2 B=1 C=4 D=2)
+[16:20:48] DOSTAWCA: Dostarczono 1 x B (stan: A=3 B=2 C=4 D=3)
+[16:20:49] DOSTAWCA: Dostarczono 1 x D (stan: A=3 B=2 C=5 D=4)
+[16:20:50] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
+[16:20:50] DOSTAWCA: Dostawca A konczy prace (pid=3854)
+[16:20:50] DOSTAWCA: Dostawca B konczy prace (pid=3855)
+[16:20:50] DOSTAWCA: Dostawca C konczy prace (pid=3856)
+[16:20:50] DOSTAWCA: Dostawca D konczy prace (pid=3857)
+[16:20:51] STANOWISKO: Stanowisko 2 konczy prace (pid=3859)
+[16:20:52] STANOWISKO: Stanowisko 1 konczy prace (pid=3858)
+```
+
 
 ## 4. Struktura repozytorium
 
@@ -345,14 +462,8 @@ fabryka-czekolady/
 
 
 
-## 6. Linki do istotnych fragmentów kodu (pkt 5.2)
+## 6. Linki do istotnych fragmentów kodu 
 
-Poniżej przedstawiono linki do kluczowych fragmentów kodu źródłowego,
-które dokumentują użycie wymaganych w projekcie konstrukcji systemowych.
-Każdy link prowadzi do konkretnego pliku oraz zakresu linii w repozytorium GitHub
-(permalink – stały link do konkretnej wersji kodu).
-
----
 
 ### a) Tworzenie i obsługa plików  
 *(creat(), open(), close(), read(), write(), unlink())*
@@ -431,21 +542,38 @@ Każdy link prowadzi do konkretnego pliku oraz zakresu linii w repozytorium GitH
 ### c) FIFO (Named Pipes)  
 *(mkfifo(), open(), read(), write(), close(), unlink())*
 
-**Nie dotyczy** – w projekcie wykorzystano kolejki komunikatów System V zamiast FIFO.
+**Nie dotyczy** – w projekcie wykorzystano kolejki komunikatów System V zamiast FIFO.  
+*Uzasadnienie:* Kolejki msg pozwalają na selektywny odbiór wiadomości po `mtype` (per-PID targeting), co jest kluczowe dla dostarczania poleceń do konkretnych procesów.
 
 ---
 
 ### f) Wątki POSIX  
 *(pthread_create(), pthread_join(), pthread_exit(), pthread_mutex_*, pthread_cond_*)*
 
-**Nie dotyczy** – projekt opiera się na wielu procesach (`fork()` + `exec()`), nie na wątkach.
+**Nie dotyczy** – projekt opiera się na wielu procesach (`fork()` + `exec()`), nie na wątkach.  
+*Uzasadnienie:* Wymaganie projektowe nakazuje użycie `fork()` + `exec()` (osobne programy z własnym `main()`). Wątki współdzieliłyby przestrzeń adresową, co uniemożliwiłoby demonstrację IPC System V.
 
 ---
 
 ### g) Gniazda (Sockets)  
 *(socket(), bind(), listen(), accept(), connect(), send(), recv())*
 
-**Nie dotyczy** – komunikacja między procesami realizowana jest przez IPC System V.
+**Nie dotyczy** – komunikacja między procesami realizowana jest przez IPC System V.  
+*Uzasadnienie:* Sockety są przeznaczone do komunikacji sieciowej. Procesy fabryki działają lokalnie i współdzielą stan magazynu w pamięci dzielonej (SHM), co jest bardziej efektywne niż serializacja przez sockety.
+
+---
+
+## 6.1. Minimalne prawa dostępu (pkt 4.1.d)
+
+Wszystkie zasoby IPC są tworzone z minimalnymi prawami dostępu **0600** (odczyt/zapis tylko dla właściciela):
+
+| Zasób | Prawa | Miejsce w kodzie |
+|-------|-------|------------------|
+| Pamięć dzielona (`shmget`) | `0600` | `src/magazyn.cpp:44` |
+| Kolejka komunikatów (`msgget`) | `0600` | `src/magazyn.cpp:51` |
+| Semafory (`semget`) | `0600` | `src/magazyn.cpp:53` |
+| Plik stanu magazynu | `0600` | `src/magazyn.cpp:149` |
+| Plik raportu | `0600` | `include/common.h:161` |
 
 ---
 
