@@ -180,7 +180,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Walidacja typu stanowiska z strtol (wymaganie 4.1b)
+    // Walidacja typu stanowiska z strtol 
     char *endptr = nullptr;
     long val = std::strtol(argv[1], &endptr, 10);
     if (endptr == argv[1] || *endptr != '\0' || (val != 1 && val != 2)) {

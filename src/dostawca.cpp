@@ -246,7 +246,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Walidacja ilości z strtol (wymaganie 4.1b)
+    // Walidacja ilości z strtol 
     int amount = 1;
     if (argc >= 3) {
         char *endptr = nullptr;

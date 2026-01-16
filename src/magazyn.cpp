@@ -131,7 +131,7 @@ void init_ipc(int capacity) {
  * Plik zawiera 5 liczb: pojemność, a, b, c, d.
  * 
  * Używamy open/read/close (syscalle) zamiast fopen/fscanf,
- * bo wykładowca tego wymagał (pkt 5.2 - syscalls do plików).
+ *
  * 
  * Po wczytaniu aktualizujemy też wartości semaforów składników,
  * żeby stanowiska mogły od razu pobierać to co było w magazynie.
@@ -198,7 +198,7 @@ void load_state_from_file() {
 void save_state_to_file() {
     P_mutex(g_semid);
 
-    // Używamy open/write/close (syscalle, pkt 5.2)
+   
     int fd = open(g_stateFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd != -1) {
         char buf[128];
@@ -419,7 +419,7 @@ void loop() {
 int main(int argc, char **argv) {
     int capacity = kDefaultCapacity;
     if (argc > 1) {
-        // Walidacja wejścia z strtol() (wymaganie 4.1b)
+        // Walidacja wejścia z strtol() 
         char *endptr = nullptr;
         long val = std::strtol(argv[1], &endptr, 10);
         if (endptr == argv[1] || *endptr != '\0') {

@@ -48,7 +48,7 @@ void die_exec(const char *what) {
 /**
  * Tworzy nowy proces potomny i uruchamia w nim podany program.
  * 
- * Używa fork() + execv() zgodnie z wymaganiami projektu.
+ * Używa fork() + execv() 
  * PID nowego procesu jest dodawany do g_children.
  * 
  * @param args wektor argumentów: args[0] = ścieżka do programu, args[1..] = argumenty
@@ -111,11 +111,9 @@ void attach_ipc() {
 // --- Wysyłanie komend przez kolejkę komunikatów ---
 
 /**
- * Wysyła komendę do konkretnego procesu (per-PID targeting).
- * 
- * To jest kluczowe! Wcześniej próbowałem broadcastu z mtype=1, ale wtedy
- * tylko jeden proces odbierał wiadomość. Teraz każda komenda idzie do
- * konkretnego PID i każdy proces słucha tylko na swoim PID.
+ * Wysyła komendę do konkretnego procesu używając jego PID jako mtype.
+ * Dzięki temu każdy proces odbiera tylko wiadomości skierowane do niego,
+ * co rozwiązuje problem z broadcastem gdzie tylko jeden proces odbierał wiadomość.
  */
 void send_command_to_pid(Command cmd, pid_t pid) {
     CommandMessage msg{};
@@ -144,7 +142,7 @@ void send_command_to_all(Command cmd) {
  *   [1-4]   = dostawcy A, B, C, D
  *   [5-6]   = stanowiska 1, 2
  */
-void send_command_to_range(Command cmd, size_t from, size_t to) {
+void  send_command_to_range(Command cmd, size_t from, size_t to) {
     for (size_t i = from; i < to && i < g_children.size(); ++i) {
         if (g_children[i] > 0) {
             send_command_to_pid(cmd, g_children[i]);
@@ -321,7 +319,7 @@ int main(int argc, char **argv) {
     int capacity = kDefaultCapacity;
     
     if (argc > 1) {
-        // Walidacja wejścia z użyciem strtol (wymaganie 4.1.b)
+        // Walidacja wejścia z użyciem strtol 
         // strtol jest bezpieczniejsze niż atoi bo pozwala wykryć błędy
         char *endptr = nullptr;
         long val = std::strtol(argv[1], &endptr, 10);
