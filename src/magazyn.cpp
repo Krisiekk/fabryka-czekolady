@@ -266,7 +266,7 @@ void process_worker_request(const WorkerRequestMessage &req) {
     bool gotA = try_P(g_semid, SEM_A, req.needA);
     if (!gotA) {
         WarehouseReplyMessage reply{};
-        reply.mtype = req.pid;
+        reply.mtype = req.pid + kReplyMtypeOffset;
         reply.granted = false;
         std::cout << "[MAGAZYN] brak A, odmowa dla PID=" << req.pid << "\n";
         msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
@@ -279,7 +279,7 @@ void process_worker_request(const WorkerRequestMessage &req) {
         // Oddaj A, wysłij odmowę
         if (req.needA) V(g_semid, SEM_A, req.needA);
         WarehouseReplyMessage reply{};
-        reply.mtype = req.pid;
+        reply.mtype = req.pid + kReplyMtypeOffset;
         reply.granted = false;
         std::cout << "[MAGAZYN] brak B, odmowa dla PID=" << req.pid << "\n";
         msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
@@ -293,7 +293,7 @@ void process_worker_request(const WorkerRequestMessage &req) {
         if (req.needA) V(g_semid, SEM_A, req.needA);
         if (req.needB) V(g_semid, SEM_B, req.needB);
         WarehouseReplyMessage reply{};
-        reply.mtype = req.pid;
+        reply.mtype = req.pid + kReplyMtypeOffset;
         reply.granted = false;
         std::cout << "[MAGAZYN] brak C, odmowa dla PID=" << req.pid << "\n";
         msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
@@ -308,7 +308,7 @@ void process_worker_request(const WorkerRequestMessage &req) {
         if (req.needB) V(g_semid, SEM_B, req.needB);
         if (req.needC) V(g_semid, SEM_C, req.needC);
         WarehouseReplyMessage reply{};
-        reply.mtype = req.pid;
+        reply.mtype = req.pid + kReplyMtypeOffset;
         reply.granted = false;
         std::cout << "[MAGAZYN] brak D, odmowa dla PID=" << req.pid << "\n";
         msgsnd(g_msgid, &reply, sizeof(reply) - sizeof(long), 0);
@@ -329,7 +329,7 @@ void process_worker_request(const WorkerRequestMessage &req) {
 
     // Odpowiedź pozytywna
     WarehouseReplyMessage reply{};
-    reply.mtype = req.pid;
+    reply.mtype = req.pid + kReplyMtypeOffset;
     reply.granted = true;
 
     // Logowanie wydania

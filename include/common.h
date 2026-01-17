@@ -72,6 +72,11 @@ enum class Command : int {
 // mtype w strukturze wiadomości musi być > 0, stąd numeracja od 1.
 // UWAGA: dla poleceń dyrektora używamy PID jako mtype (per-PID targeting),
 //        te wartości są tylko dla innych typów wiadomości.
+//
+// Offset dla odpowiedzi magazynu - żeby reply.mtype != command.mtype
+// (oba używają PID, więc bez offsetu mogłoby dojść do konfliktu)
+constexpr long kReplyMtypeOffset = 1000000;
+
 enum class MsgType : long {
 	CommandBroadcast = 1,  // (nieużywane - komendy idą per-PID)
 	SupplierReport = 2,    // raport od dostawcy do magazynu
@@ -261,7 +266,7 @@ inline void setup_sigaction(void (*handler)(int)) {
 	sa.sa_flags = 0;  // NIE ustawiamy SA_RESTART - chcemy żeby syscalle były przerywane
 	sigemptyset(&sa.sa_mask);
 	
-	// Obsługujemy 4 sygnały (wymaganie: co najmniej 2 różne)
+
 	if (sigaction(SIGTERM, &sa, nullptr) == -1) perror("sigaction SIGTERM");
 	if (sigaction(SIGINT, &sa, nullptr) == -1) perror("sigaction SIGINT");
 	if (sigaction(SIGUSR1, &sa, nullptr) == -1) perror("sigaction SIGUSR1");

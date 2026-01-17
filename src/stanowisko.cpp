@@ -108,10 +108,11 @@ void request_and_produce() {
     }
 
     // Czekanie na odpowiedź od magazynu
-    // mtype = nasz PID, żeby odebrać odpowiedź skierowaną do nas
+    // mtype = PID + offset, żeby nie kolidować z komendami (które też używają PID jako mtype)
     WarehouseReplyMessage rep{};
+    long replyMtype = req.pid + kReplyMtypeOffset;
     while (!g_stop) {
-        ssize_t r = msgrcv(g_msgid, &rep, sizeof(rep) - sizeof(long), req.pid, IPC_NOWAIT);
+        ssize_t r = msgrcv(g_msgid, &rep, sizeof(rep) - sizeof(long), replyMtype, IPC_NOWAIT);
 
         if (r >= 0) {
             std::cout << "[PRACOWNIK] got reply: pid=" << getpid()
