@@ -13,7 +13,6 @@
 
 // --- Nagłówki systemowe dla IPC ---
 #include <sys/ipc.h>    // klucze IPC (ftok)
-#include <sys/msg.h>    // kolejki komunikatów
 #include <sys/sem.h>    // semafory System V
 #include <sys/shm.h>    // pamięć dzielona
 #include <sys/types.h>  // typy systemowe (pid_t, key_t)
@@ -27,21 +26,31 @@
 #include <cstdint>      // typy o stałym rozmiarze
 #include <cstdio>       // perror, snprintf
 #include <cstdlib>      // exit, strtol
+#include <cstring>      // memset, memcpy
 #include <ctime>        // timestampy do logów
+
+// ============================================================================
+// UNION SEMUN - wymagany przez semctl() na Linuxie
+// ============================================================================
+// Na większości Linuxów union semun nie jest zdefiniowany w sys/sem.h,
+// trzeba go zdefiniować samodzielnie.
+union semun {
+    int val;               // wartość dla SETVAL
+    struct semid_ds *buf;  // bufor dla IPC_STAT, IPC_SET
+    unsigned short *array; // tablica dla GETALL, SETALL
+};
 
 // ============================================================================
 // KONFIGURACJA IPC
 // ============================================================================
 
 // Ścieżka do pliku używanego przez ftok() do generowania klucza IPC.
-// Wszystkie procesy muszą używać tego samego pliku żeby dostać ten sam klucz.
 constexpr const char *kIpcKeyPath = "./ipc.key";
 
-// Identyfikator projektu dla ftok() - może być dowolny, byle ten sam wszędzie
+// Identyfikator projektu dla ftok()
 constexpr int kProjId = 0x42;
 
 // Tworzy plik ipc.key jeśli nie istnieje - potrzebny dla ftok()
-// Bez tego ftok() zwróci błąd bo nie znajdzie pliku
 inline void ensure_ipc_key() {
 	int fd = open(kIpcKeyPath, O_CREAT | O_WRONLY, 0600);
 	if (fd == -1) {
@@ -51,147 +60,228 @@ inline void ensure_ipc_key() {
 	}
 }
 
-// Domyślna pojemność magazynu gdy nie podano argumentu
-constexpr int kDefaultCapacity = 100;
+// Domyślna liczba czekolad na pracownika gdy nie podano argumentu
+constexpr int kDefaultChocolates = 100;
 
 // ============================================================================
-// TYPY POLECEŃ I WIADOMOŚCI
+// ROZMIARY SKŁADNIKÓW W PAMIĘCI
 // ============================================================================
 
-// Komendy wysyłane przez dyrektora do procesów potomnych.
-// Numeracja 1-4 odpowiada poleceniom z treści zadania.
-enum class Command : int {
-	None = 0,         // brak komendy (domyślnie)
-	StopFabryka = 1,  // polecenie_1: zatrzymaj stanowiska produkcyjne
-	StopMagazyn = 2,  // polecenie_2: zatrzymaj magazyn
-	StopDostawcy = 3, // polecenie_3: zatrzymaj dostawców
-	StopAll = 4       // polecenie_4: zapisz stan i zakończ wszystko
-};
-
-// Typy wiadomości w kolejce komunikatów.
-// mtype w strukturze wiadomości musi być > 0, stąd numeracja od 1.
-// UWAGA: dla poleceń dyrektora używamy PID jako mtype (per-PID targeting),
-//        te wartości są tylko dla innych typów wiadomości.
-//
-// Offset dla odpowiedzi magazynu - żeby reply.mtype != command.mtype
-// (oba używają PID, więc bez offsetu mogłoby dojść do konfliktu)
-constexpr long kReplyMtypeOffset = 1000000;
-
-enum class MsgType : long {
-	CommandBroadcast = 1,  // (nieużywane - komendy idą per-PID)
-	SupplierReport = 2,    // raport od dostawcy do magazynu
-	WorkerRequest = 3,     // żądanie surowców od stanowiska
-	WarehouseReply = 4     // odpowiedź magazynu do stanowiska
-};
+// Każdy składnik zajmuje określoną ilość bajtów w pamięci
+constexpr int kSizeA = 1;  // składnik A = 1 bajt
+constexpr int kSizeB = 1;  // składnik B = 1 bajt
+constexpr int kSizeC = 2;  // składnik C = 2 bajty
+constexpr int kSizeD = 3;  // składnik D = 3 bajty
 
 // ============================================================================
-// STRUKTURY WIADOMOŚCI (dla kolejki komunikatów)
+// PAMIĘĆ DZIELONA - MAGAZYN
 // ============================================================================
 
-// Wiadomość z komendą od dyrektora.
-// mtype = PID procesu docelowego (dzięki temu każdy proces odbiera tylko swoje)
-struct CommandMessage {
-	long mtype;      // PID procesu docelowego
-	Command cmd;     // jaka komenda
+/**
+ * Struktura nagłówka magazynu w pamięci dzielonej.
+ * 
+ * Po nagłówku następują segmenty danych dla składników A, B, C, D.
+ * Całkowita wielkość pamięci = sizeof(WarehouseHeader) + dataSize
+ * 
+ * Dla N czekolad na pracownika:
+ *   capacityA = 2*N (obie receptury używają A)
+ *   capacityB = 2*N (obie receptury używają B)
+ *   capacityC = N   (tylko typ 1)
+ *   capacityD = N   (tylko typ 2)
+ *   dataSize = 2*N*1 + 2*N*1 + N*2 + N*3 = 9*N bajtów
+ */
+struct WarehouseHeader {
+	int targetChocolates;  // ile czekolad na pracownika (argument z CLI)
+	
+	// Pojemności segmentów (ile sztuk max)
+	int capacityA;
+	int capacityB;
+	int capacityC;
+	int capacityD;
+	
+	// UWAGA: Ilości składników są trzymane w semaforach FULL_X, nie w pamięci!
+	
+	// Offsety do danych w pamięci (względem początku segmentu danych)
+	size_t offsetA;  // = 0
+	size_t offsetB;  // = capacityA * kSizeA
+	size_t offsetC;  // = offsetB + capacityB * kSizeB
+	size_t offsetD;  // = offsetC + capacityC * kSizeC
+	
+	// Łączny rozmiar danych (bez nagłówka)
+	size_t dataSize;
 };
 
-// Żądanie surowców od stanowiska produkcyjnego do magazynu.
-// Stanowisko wysyła ile potrzebuje każdego składnika.
-struct WorkerRequestMessage {
-	long mtype;       // MsgType::WorkerRequest
-	int workerType;   // 1 lub 2 (typ stanowiska)
-	int needA;        // ile sztuk składnika A potrzebuje
-	int needB;        // ile sztuk składnika B
-	int needC;        // ile sztuk składnika C (tylko stanowisko 1)
-	int needD;        // ile sztuk składnika D (tylko stanowisko 2)
-	pid_t pid;        // PID stanowiska - na ten PID magazyn wyśle odpowiedź
-};
+/**
+ * Oblicza rozmiar pamięci dzielonej dla N czekolad na pracownika.
+ */
+inline size_t calc_shm_size(int n) {
+	size_t headerSize = sizeof(WarehouseHeader);
+	size_t dataSize = static_cast<size_t>(2*n) * kSizeA   // segment A
+	                + static_cast<size_t>(2*n) * kSizeB   // segment B
+	                + static_cast<size_t>(n) * kSizeC     // segment C
+	                + static_cast<size_t>(n) * kSizeD;    // segment D
+	return headerSize + dataSize;
+}
 
-// Odpowiedź magazynu na żądanie stanowiska
-struct WarehouseReplyMessage {
-	long mtype;       // PID stanowiska które pytało
-	bool granted;     // true = wydano surowce, false = brak (spróbuj później)
-};
+/**
+ * Inicjalizuje nagłówek magazynu dla N czekolad na pracownika.
+ */
+inline void init_warehouse_header(WarehouseHeader* h, int n) {
+	h->targetChocolates = n;
+	
+	// Pojemności
+	h->capacityA = 2 * n;
+	h->capacityB = 2 * n;
+	h->capacityC = n;
+	h->capacityD = n;
+	
+	// Offsety segmentów (dane zaczynają się tuż za nagłówkiem)
+	h->offsetA = 0;
+	h->offsetB = h->offsetA + static_cast<size_t>(h->capacityA) * kSizeA;
+	h->offsetC = h->offsetB + static_cast<size_t>(h->capacityB) * kSizeB;
+	h->offsetD = h->offsetC + static_cast<size_t>(h->capacityC) * kSizeC;
+	
+	// Łączny rozmiar danych
+	h->dataSize = h->offsetD + static_cast<size_t>(h->capacityD) * kSizeD;
+}
 
-// Raport od dostawcy (informacja tekstowa)
-struct SupplierReportMessage {
-	long mtype;       // MsgType::SupplierReport
-	char text[64];    // treść raportu
-};
+/**
+ * Zwraca wskaźnik na początek danych (tuż za nagłówkiem).
+ */
+inline char* warehouse_data(WarehouseHeader* h) {
+	return reinterpret_cast<char*>(h) + sizeof(WarehouseHeader);
+}
 
-// ============================================================================
-// PAMIĘĆ DZIELONA - STAN MAGAZYNU
-// ============================================================================
-
-// Struktura przechowywana w pamięci dzielonej - aktualny stan magazynu.
-// Dostęp chroniony semaforem SEM_MUTEX.
-struct WarehouseState {
-	int capacity;     // max pojemność w jednostkach (A,B=1, C=2, D=3)
-	int a;            // ile sztuk składnika A w magazynie
-	int b;            // ile sztuk składnika B
-	int c;            // ile sztuk składnika C
-	int d;            // ile sztuk składnika D
-};
+/**
+ * Zwraca wskaźnik na segment A/B/C/D.
+ */
+inline char* segment_A(WarehouseHeader* h) { return warehouse_data(h) + h->offsetA; }
+inline char* segment_B(WarehouseHeader* h) { return warehouse_data(h) + h->offsetB; }
+inline char* segment_C(WarehouseHeader* h) { return warehouse_data(h) + h->offsetC; }
+inline char* segment_D(WarehouseHeader* h) { return warehouse_data(h) + h->offsetD; }
 
 // ============================================================================
 // SEMAFORY
 // ============================================================================
 
-// Indeksy semaforów w zestawie. Używamy jednego zestawu z 7 semaforami.
+/*
+ * Indeksy semaforów w zestawie - model RING BUFFER z OFFSETAMI BAJTOWYMI.
+ * 
+ * Dla każdego składnika X (A, B, C, D) mamy 4 semafory:
+ *   SEM_EMPTY_X - liczba WOLNYCH miejsc (init = capacity)
+ *   SEM_FULL_X  - liczba ZAJĘTYCH miejsc / dostępnych sztuk (init = 0)
+ *   SEM_IN_X    - OFFSET BAJTOWY zapisu (init = 0)
+ *   SEM_OUT_X   - OFFSET BAJTOWY odczytu (init = 0)
+ * 
+ * Dostawca:
+ *   P(EMPTY_X) -> offset = IN_X -> wpisz[offset] -> IN = (IN + itemSize) % segmentSize -> V(FULL_X)
+ * 
+ * Stanowisko:
+ *   P(FULL_X) -> offset = OUT_X -> czytaj[offset] -> OUT = (OUT + itemSize) % segmentSize -> V(EMPTY_X)
+ * 
+ * IN/OUT to OFFSETY BAJTOWE (nie numery elementów)!
+ * 
+ * Mutexy:
+ *   SEM_MUTEX - ochrona sekcji krytycznych w pamięci dzielonej
+ *   SEM_RAPORT - ochrona zapisu do pliku raportu
+ */
 enum SemaphoreIndex {
-	SEM_MUTEX = 0,     // mutex do ochrony pamięci dzielonej (sekcja krytyczna)
-	SEM_CAPACITY = 1,  // zlicza wolne miejsce w magazynie (producent-konsument)
-	SEM_A = 2,         // zlicza dostępne sztuki składnika A
-	SEM_B = 3,         // zlicza dostępne sztuki składnika B
-	SEM_C = 4,         // zlicza dostępne sztuki składnika C
-	SEM_D = 5,         // zlicza dostępne sztuki składnika D
-	SEM_RAPORT = 6,    // mutex do pliku raportu (żeby logi się nie mieszały)
-	SEM_COUNT = 7      // łączna liczba semaforów
+	SEM_MUTEX = 0,      // mutex do ochrony pamięci dzielonej
+	SEM_RAPORT = 1,     // mutex do pliku raportu
+	// EMPTY - wolne miejsca
+	SEM_EMPTY_A = 2,
+	SEM_EMPTY_B = 3,
+	SEM_EMPTY_C = 4,
+	SEM_EMPTY_D = 5,
+	// FULL - zajęte miejsca
+	SEM_FULL_A = 6,
+	SEM_FULL_B = 7,
+	SEM_FULL_C = 8,
+	SEM_FULL_D = 9,
+	// IN - OFFSET BAJTOWY zapisu (gdzie dostawca wpisuje)
+	SEM_IN_A = 10,
+	SEM_IN_B = 11,
+	SEM_IN_C = 12,
+	SEM_IN_D = 13,
+	// OUT - OFFSET BAJTOWY odczytu (skąd stanowisko czyta)
+	SEM_OUT_A = 14,
+	SEM_OUT_B = 15,
+	SEM_OUT_C = 16,
+	SEM_OUT_D = 17,
+	// Flaga czy magazyn działa (1=ON, 0=OFF)
+	SEM_WAREHOUSE_ON = 18,
+	SEM_COUNT = 19      // łączna liczba semaforów
 };
 
 // ============================================================================
 // FUNKCJE POMOCNICZE
 // ============================================================================
 
-// Wypisz błąd i zakończ program - używane gdy coś pójdzie nie tak z IPC
 inline void die_perror(const char *msg) {
 	perror(msg);
 	std::exit(EXIT_FAILURE);
 }
 
-
 // --- Operacje na semaforach ---
-// Wrapper na semop() dla zwiększania wartości semafora (operacja V / signal)
-inline int sem_up(int semid, int semnum, int delta = 1, short flg = 0) {
-	sembuf op{static_cast<unsigned short>(semnum), static_cast<short>(delta), flg};
+
+/*
+ * sem_V_retry (signal) - zwiększa wartość semafora
+ * 
+ * RETRY na EINTR - operacja MUSI się udać!
+ * Używaj do oddawania EMPTY/FULL po zakończeniu operacji.
+ * Sygnał NIE może "zgubić" podbicia semafora.
+ * 
+ * Zwraca: 0 przy sukcesie, -1 przy błędzie innym niż EINTR
+ */
+inline int sem_V_retry(int semid, int semnum, int delta = 1) {
+	sembuf op{static_cast<unsigned short>(semnum), static_cast<short>(delta), 0};
+	while (true) {
+		if (semop(semid, &op, 1) == 0) return 0;
+		if (errno == EINTR) continue;  // sygnał - ponów
+		return -1;  // prawdziwy błąd
+	}
+}
+
+/*
+ * sem_P_intr (wait) - zmniejsza wartość semafora (PRZERYWALNE!)
+ * 
+ * NIE robi retry na EINTR - pozwala procesowi wyjść po sygnale.
+ * Używaj do czekania na FULL/EMPTY.
+ * 
+ * Zwraca: 0 przy sukcesie, -1 przy błędzie (w tym EINTR!)
+ * Sprawdź errno==EINTR żeby rozróżnić sygnał od błędu.
+ */
+inline int sem_P_intr(int semid, int semnum, int delta = 1) {
+	sembuf op{static_cast<unsigned short>(semnum), static_cast<short>(-delta), 0};
 	return semop(semid, &op, 1);
 }
 
-// Wrapper na semop() dla zmniejszania wartości semafora (operacja P / wait)
-inline int sem_down(int semid, int semnum, int delta = 1, short flg = 0) {
-	sembuf op{static_cast<unsigned short>(semnum), static_cast<short>(-delta), flg};
+// P z SEM_UNDO (dla mutexów - automatyczne zwolnienie przy crashu)
+inline int sem_P_undo(int semid, int semnum) {
+	sembuf op{static_cast<unsigned short>(semnum), -1, SEM_UNDO};
 	return semop(semid, &op, 1);
 }
 
-// Operacja P (wait) na mutexie z flagą SEM_UNDO.
-// SEM_UNDO sprawia że jeśli proces umrze, semafor zostanie automatycznie zwolniony
-// (zapobiega deadlockom gdy proces crashuje trzymając mutex).
+// V z SEM_UNDO (dla mutexów)
+inline int sem_V_undo(int semid, int semnum) {
+	sembuf op{static_cast<unsigned short>(semnum), 1, SEM_UNDO};
+	return semop(semid, &op, 1);
+}
+
+// Wygodne wrappery dla mutexów
+// PĘTLA NA EINTR - mutex MUSI być zdobyty/zwolniony!
 inline void P_mutex(int semid) {
-	if (sem_down(semid, SEM_MUTEX, 1, SEM_UNDO) == -1) die_perror("P_mutex");
+	while (sem_P_undo(semid, SEM_MUTEX) == -1) {
+		if (errno == EINTR) continue;  // sygnał - ponów
+		die_perror("P_mutex");
+	}
 }
 
-// Operacja V (signal) na mutexie - zwalnia mutex
 inline void V_mutex(int semid) {
-	if (sem_up(semid, SEM_MUTEX, 1, SEM_UNDO) == -1) die_perror("V_mutex");
-}
-
-// Zwykłe P/V bez SEM_UNDO - używane dla semaforów zliczających (pojemność, składniki)
-inline void P(int semid, int semnum, int delta = 1) {
-	if (sem_down(semid, semnum, delta, 0) == -1) die_perror("P");
-}
-
-inline void V(int semid, int semnum, int delta = 1) {
-	if (sem_up(semid, semnum, delta, 0) == -1) die_perror("V");
+	while (sem_V_undo(semid, SEM_MUTEX) == -1) {
+		if (errno == EINTR) continue;  // sygnał - ponów
+		die_perror("V_mutex");
+	}
 }
 
 // ============================================================================
@@ -200,48 +290,36 @@ inline void V(int semid, int semnum, int delta = 1) {
 
 constexpr const char *kRaportPath = "raport.txt";
 
-/**
- * Zapisuje linię do pliku raportu z timestampem.
- * 
- * Format: [HH:MM:SS] PROCES: wiadomość
- * 
- * Używa semafora SEM_RAPORT żeby logi z różnych procesów się nie mieszały.
- * Mógłbym użyć SEM_MUTEX ale wtedy zapis do pliku blokowałby cały magazyn.
- */
 inline void log_raport(int semid, const char* proces, const char* msg) {
-	// Wejście do sekcji krytycznej zapisu do pliku
-	if (sem_down(semid, SEM_RAPORT, 1, SEM_UNDO) == -1) {
+	// Wejście do sekcji krytycznej (retry na EINTR)
+	while (sem_P_undo(semid, SEM_RAPORT) == -1) {
+		if (errno == EINTR) continue;  // sygnał - ponów
 		perror("P SEM_RAPORT");
-		return;
+		return;  // prawdziwy błąd - nie logujemy
 	}
 	
-	// Otwieram plik w trybie append - każdy proces dopisuje na końcu
 	int fd = open(kRaportPath, O_WRONLY | O_CREAT | O_APPEND, 0600);
 	if (fd != -1) {
-		// Przygotuj timestamp
 		time_t now = time(nullptr);
 		struct tm tmnow{};
-		localtime_r(&now, &tmnow);  // wersja thread-safe localtime
+		localtime_r(&now, &tmnow);
 		char timebuf[64];
 		strftime(timebuf, sizeof(timebuf), "%H:%M:%S", &tmnow);
 		
-		// Sformatuj i zapisz linię
 		char linebuf[256];
 		int len = snprintf(linebuf, sizeof(linebuf), "[%s] %s: %s\n", timebuf, proces, msg);
 		
 		if (len > 0 && len < static_cast<int>(sizeof(linebuf))) {
-			if (write(fd, linebuf, len) == -1) {
-				perror("write raport");
-			}
+			write(fd, linebuf, len);
 		}
 		close(fd);
-	} else {
-		perror("open raport");
 	}
 	
-	// Zwolnij semafor
-	if (sem_up(semid, SEM_RAPORT, 1, SEM_UNDO) == -1) {
+	// Zwolnienie sekcji krytycznej (retry na EINTR)
+	while (sem_V_undo(semid, SEM_RAPORT) == -1) {
+		if (errno == EINTR) continue;
 		perror("V SEM_RAPORT");
+		break;  // prawdziwy błąd - wychodzimy
 	}
 }
 
@@ -250,51 +328,21 @@ inline void log_raport(int semid, const char* proces, const char* msg) {
 // ============================================================================
 
 /**
- * Konfiguruje obsługę sygnałów przez sigaction().
+ * Konfiguruje obsługę sygnałów.
  * 
- * sigaction() jest lepsze od signal() bo:
- * - zachowanie jest przenośne między systemami
- * - można kontrolować czy syscalle mają być restartowane
- * - można blokować inne sygnały podczas obsługi
- * 
- * Używam flag = 0 (bez SA_RESTART) żeby sleep() i inne blokujące funkcje
- * zwracały EINTR po otrzymaniu sygnału - dzięki temu proces może się zakończyć.
+ * Bez SA_RESTART - blokujące semop() zwróci EINTR po sygnale,
+ * co pozwala procesowi zakończyć się.
  */
 inline void setup_sigaction(void (*handler)(int)) {
 	struct sigaction sa{};
 	sa.sa_handler = handler;
-	sa.sa_flags = 0;  // NIE ustawiamy SA_RESTART - chcemy żeby syscalle były przerywane
+	sa.sa_flags = 0;  // bez SA_RESTART!
 	sigemptyset(&sa.sa_mask);
-	
 
-	if (sigaction(SIGTERM, &sa, nullptr) == -1) perror("sigaction SIGTERM");
-	if (sigaction(SIGINT, &sa, nullptr) == -1) perror("sigaction SIGINT");
-	if (sigaction(SIGUSR1, &sa, nullptr) == -1) perror("sigaction SIGUSR1");
-	if (sigaction(SIGUSR2, &sa, nullptr) == -1) perror("sigaction SIGUSR2");
-}
-
-// ============================================================================
-// ODBIERANIE POLECEŃ
-// ============================================================================
-
-/**
- * Sprawdza czy przyszła komenda dla tego procesu (nieblokujące).
- * 
- * Kluczowa rzecz: używamy getpid() jako mtype!
- * Dyrektor wysyła komendę z mtype = PID procesu docelowego,
- * a każdy proces odbiera tylko wiadomości ze swoim PID.
- * 
- * Wcześniej próbowałem broadcastu (mtype=1) ale wtedy tylko jeden proces
- * odbierał wiadomość i reszta jej nie widziała. Per-PID rozwiązuje ten problem.
- */
-inline Command check_command(int msqid) {
-	CommandMessage msg{};
-	// IPC_NOWAIT = nie blokuj jeśli nie ma wiadomości, zwróć błąd ENOMSG
-	ssize_t ret = msgrcv(msqid, &msg, sizeof(msg) - sizeof(long), getpid(), IPC_NOWAIT);
-	if (ret != -1) {
-		return msg.cmd;
-	}
-	return Command::None;
+	sigaction(SIGTERM, &sa, nullptr);
+	sigaction(SIGINT, &sa, nullptr);
+	sigaction(SIGUSR1, &sa, nullptr);
+	// SIGUSR2 - zarezerwowany na przyszłość, obecnie niewykorzystywany
 }
 
 #endif  // COMMON_H

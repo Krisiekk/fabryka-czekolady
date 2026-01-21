@@ -1,19 +1,6 @@
-/*
- * dostawca.cpp - Proces dostawcy składników (A, B, C lub D)
- * 
- * Każdy dostawca odpowiada za jeden typ składnika i cyklicznie
- * dostarcza go do magazynu. Ilość dostawy zależy od wolnego miejsca
- * i aktualnego zapasu danego składnika.
- * 
- * Rozmiary składników w jednostkach magazynowych:
- *   A = 1, B = 1, C = 2, D = 3
- * 
- * Dostawca reaguje na komendy:
- *   - StopDostawcaX (X=A/B/C/D) - zatrzymaj konkretnego dostawcę
- *   - StopAll - zatrzymaj wszystkich
- * 
- * Autor: Krzysztof Pietrzak (156721)
- */
+// Proces dostawcy - dostarcza składniki do magazynu
+// Czyta z semaforów i pisze dane do pamięci dzielonej
+// Kończy pracę po sygnale SIGTERM
 
 #include "../include/common.h"
 
@@ -24,272 +11,240 @@
 #include <iostream>
 #include <string>
 #include <unistd.h>
+#include <sys/prctl.h>  // prctl(PR_SET_PDEATHSIG)
 
 namespace {
 
-// --- Zmienne globalne ---
-int g_msgid = -1;                    // ID kolejki komunikatów
-int g_semid = -1;                    // ID zestawu semaforów
-int g_shmid = -1;                    // ID pamięci dzielonej
-WarehouseState *g_state = nullptr;   // wskaźnik na stan magazynu
-volatile sig_atomic_t g_stop = 0;    // flaga zakończenia (sig_atomic_t dla bezpieczeństwa)
-char g_type = 'A';                   // typ składnika (A/B/C/D)
+// Zmienne globalne
+int g_semid = -1;                     // ID semaforów
+int g_shmid = -1;                     // ID pamięci dzielonej
+WarehouseHeader *g_header = nullptr;  // nagłówek magazynu
+volatile sig_atomic_t g_stop = 0;     // flaga do końca
+char g_type = 'A';                    // typ składnika A/B/C/D
 
 void handle_signal(int) { g_stop = 1; }
 
-// Ile jednostek magazynowych zajmuje jeden składnik danego typu
-static int units_per_item(char t) {
+// Zwraca rozmiar składnika w bajtach
+static int size_of(char t) {
     switch (t) {
-        case 'A': return 1;
-        case 'B': return 1;
-        case 'C': return 2;  // składnik C jest większy
-        case 'D': return 3;  // składnik D jest największy
+        case 'A': return kSizeA;
+        case 'B': return kSizeB;
+        case 'C': return kSizeC;
+        case 'D': return kSizeD;
         default:  return 1;
     }
 }
 
-// Mapowanie typu składnika na indeks semafora
-static int sem_index_for(char t) {
+// Zwraca semafor EMPTY dla danego typu
+static int sem_empty_for(char t) {
     switch (t) {
-        case 'A': return SEM_A;
-        case 'B': return SEM_B;
-        case 'C': return SEM_C;
-        case 'D': return SEM_D;
-        default:  return SEM_A;
+        case 'A': return SEM_EMPTY_A;
+        case 'B': return SEM_EMPTY_B;
+        case 'C': return SEM_EMPTY_C;
+        case 'D': return SEM_EMPTY_D;
+        default:  return SEM_EMPTY_A;
     }
 }
 
-/*
- * target_units() - Docelowa ilość jednostek danego składnika
- * 
- * Dostawca stara się utrzymać taki miks w magazynie:
- *   A: 2/9, B: 2/9, C: 2/9, D: 3/9 pojemności
- * 
- * To zapewnia że stanowiska zawsze mają z czego produkować.
- */
-static int target_units(char t, int capUnits) {
+// Zwraca semafor FULL dla danego typu
+static int sem_full_for(char t) {
     switch (t) {
-        case 'A': return (2 * capUnits) / 9;
-        case 'B': return (2 * capUnits) / 9;
-        case 'C': return (2 * capUnits) / 9;
-        case 'D': return (3 * capUnits) / 9;
-        default:  return capUnits / 4;
+        case 'A': return SEM_FULL_A;
+        case 'B': return SEM_FULL_B;
+        case 'C': return SEM_FULL_C;
+        case 'D': return SEM_FULL_D;
+        default:  return SEM_FULL_A;
     }
 }
 
-// Tworzenie klucza IPC (ten sam co w magazynie)
+// Zwraca semafor IN dla danego typu
+static int sem_in_for(char t) {
+    switch (t) {
+        case 'A': return SEM_IN_A;
+        case 'B': return SEM_IN_B;
+        case 'C': return SEM_IN_C;
+        case 'D': return SEM_IN_D;
+        default:  return SEM_IN_A;
+    }
+}
+
+// Zwraca segment i pojemność dla typu
+static char* get_segment(char t, int& capacity) {
+    switch (t) {
+        case 'A':
+            capacity = g_header->capacityA;
+            return segment_A(g_header);
+        case 'B':
+            capacity = g_header->capacityB;
+            return segment_B(g_header);
+        case 'C':
+            capacity = g_header->capacityC;
+            return segment_C(g_header);
+        case 'D':
+            capacity = g_header->capacityD;
+            return segment_D(g_header);
+        default:
+            capacity = g_header->capacityA;
+            return segment_A(g_header);
+    }
+}
+
+// Tworzy klucz IPC
 key_t make_key() {
     key_t key = ftok(kIpcKeyPath, kProjId);
     if (key == -1) die_perror("ftok");
     return key;
 }
 
-/*
- * attach_ipc() - Dołączenie do istniejących zasobów IPC
- * 
- * Dostawca nie tworzy zasobów (robi to magazyn), tylko się dołącza.
- * Bez IPC_CREAT - jeśli zasoby nie istnieją, kończymy z błędem.
- */
+// Łączy się do zasobów IPC (które stworzył magazyn)
 void attach_ipc() {
     key_t key = make_key();
 
-    // Pamięć dzielona (bez IPC_CREAT = dołącz do istniejącej)
-    g_shmid = shmget(key, sizeof(WarehouseState), 0600);
+    // Najpierw musimy poznać rozmiar pamięci - dołączamy bez podawania rozmiaru
+    // (shmget z rozmiarem 0 dołącza do istniejącego segmentu)
+    g_shmid = shmget(key, 0, 0600);
     if (g_shmid == -1) die_perror("shmget");
 
     // Mapowanie pamięci
-    g_state = static_cast<WarehouseState*>(shmat(g_shmid, nullptr, 0));
-    if (g_state == reinterpret_cast<void*>(-1)) die_perror("shmat");
+    g_header = static_cast<WarehouseHeader*>(shmat(g_shmid, nullptr, 0));
+    if (g_header == reinterpret_cast<void*>(-1)) die_perror("shmat");
 
     // Semafory
     g_semid = semget(key, SEM_COUNT, 0600);
     if (g_semid == -1) die_perror("semget");
-
-    // Kolejka komunikatów
-    g_msgid = msgget(key, 0600);
-    if (g_msgid == -1) die_perror("msgget");
 }
 
-// Deklaracja - używana w deliver_once()
-void check_command();
-
-/*
- * deliver_once() - Jedna dostawa składnika do magazynu
- * 
- * Algorytm:
- *   1. Sprawdź ile miejsca wolnego w magazynie
- *   2. Oblicz ile składnika już jest i ile brakuje do targetu
- *   3. Rezerwuj miejsce (P na SEM_CAPACITY)
- *   4. Aktualizuj stan w pamięci dzielonej
- *   5. Zwiększ semafor składnika (V) - stanowiska mogą teraz pobierać
- * 
- * Między krokami sprawdzamy czy nie przyszła komenda stop.
- */
-void deliver_once(int amount) {
-    int uPer = units_per_item(g_type);
-    int units = amount * uPer;
-
-    // Odczyt stanu magazynu (z mutexem)
-    P_mutex(g_semid);
-    int cap = g_state->capacity;
-    int a = g_state->a, b = g_state->b, c = g_state->c, d = g_state->d;
-    int usedUnits = a + b + 2*c + 3*d;
-    int freeUnits = cap - usedUnits;
-    if (freeUnits < 0) freeUnits = 0;
-
-    // Ile jednostek naszego składnika jest obecnie
-    int myUnitsNow = 0;
-    if (g_type == 'A') myUnitsNow = a * 1;
-    if (g_type == 'B') myUnitsNow = b * 1;
-    if (g_type == 'C') myUnitsNow = c * 2;
-    if (g_type == 'D') myUnitsNow = d * 3;
-
-    int myTarget = target_units(g_type, cap);
-    V_mutex(g_semid);
-
-    // Jeśli już mamy wystarczająco dużo tego składnika, odpuszczamy
-    // (żeby nie zapychać magazynu jednym typem)
-    if (freeUnits < 10 && myUnitsNow > myTarget) {
-        std::cout << "[DOSTAWCA " << g_type << "] miks OK? mam " << myUnitsNow
-                  << "u > target " << myTarget << "u, czekam\n";
-        // Krótkie czekanie ze sprawdzaniem czy nie przyszła komenda stop
-        for (int i = 0; i < 3 && !g_stop; i++) {
-            usleep(100000);
-            check_command();
-        }
-        return;
+// Dostarcza jeden składnik - czeka na P(EMPTY), pisze dane, robi V(FULL)
+bool deliver_one() {
+    // Sprawdź czy magazyn otwarty - jeśli nie, wypisz info i czekaj
+    int warehouseOn = semctl(g_semid, SEM_WAREHOUSE_ON, GETVAL);
+    if (warehouseOn == 0) {
+        std::cout << "[DOSTAWCA " << g_type << "] Magazyn zamknięty - czekam na wznowienie pracy...\n";
     }
-
-    // Rezerwacja miejsca w magazynie (nieblokujące)
-    // IPC_NOWAIT - jeśli nie ma miejsca, nie czekamy
-    sembuf op{static_cast<unsigned short>(SEM_CAPACITY), static_cast<short>(-units), IPC_NOWAIT};
-    if (semop(g_semid, &op, 1) == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            std::cout << "[DOSTAWCA " << g_type << "] magazyn pełny, czekam\n";
-            for (int i = 0; i < 3 && !g_stop; i++) {
-                usleep(100000);
-                check_command();
-            }
-            return;
-        }
-        perror("semop capacity");
-        return;
+    
+    // Czekaj aż magazyn będzie otwarty (blokująco na semaforze)
+    if (sem_P_intr(g_semid, SEM_WAREHOUSE_ON, 1) == -1) {
+        return false;  // EINTR = sygnał
     }
+    // Od razu oddaj - to tylko bramka
+    sem_V_retry(g_semid, SEM_WAREHOUSE_ON, 1);
 
-    // Aktualizacja stanu w pamięci dzielonej
+    int itemSize = size_of(g_type);
+    int semEmpty = sem_empty_for(g_type);
+    int semFull = sem_full_for(g_type);
+    int semIn = sem_in_for(g_type);
+    
+    // Czekaj na miejsce w magazynie
+    if (sem_P_intr(g_semid, semEmpty, 1) == -1) {
+        if (errno == EINTR) return false;
+        perror("sem_P EMPTY");
+        return false;
+    }
+    
+    // Pobierz segment i jego rozmiar
+    int capacity;
+    char *segment = get_segment(g_type, capacity);
+    int segmentSize = capacity * itemSize;
+    
+    // Wchodzimy do sekcji krytycznej
     P_mutex(g_semid);
-    if (g_type == 'A') g_state->a += amount;
-    if (g_type == 'B') g_state->b += amount;
-    if (g_type == 'C') g_state->c += amount;
-    if (g_type == 'D') g_state->d += amount;
+    
+    // Pobierz offset zapisu
+    int inOffset = semctl(g_semid, semIn, GETVAL);
+    if (inOffset == -1) {
+        perror("semctl GETVAL IN");
+        V_mutex(g_semid);
+        sem_V_retry(g_semid, semEmpty, 1);
+        return false;
+    }
+    
+    // Oblicz następny offset (ring buffer)
+    int newInOffset = (inOffset + itemSize) % segmentSize;
+    
+    // Zapisz dane
+    char *dest = segment + inOffset;
+    std::memset(dest, static_cast<int>(g_type), itemSize);
+    
+    // Ustaw nowy offset
+    union semun arg;
+    arg.val = newInOffset;
+    if (semctl(g_semid, semIn, SETVAL, arg) == -1) {
+        perror("semctl SETVAL IN");
+        std::memset(dest, 0, itemSize);
+        V_mutex(g_semid);
+        sem_V_retry(g_semid, semEmpty, 1);
+        return false;
+    }
+    
     V_mutex(g_semid);
-
-    // Zwiększenie semafora składnika - stanowiska mogą teraz pobierać
-    V(g_semid, sem_index_for(g_type), amount);
-
-    // Log do pliku raportu
+    
+    // Sygnalizuj że są dostępne dane
+    if (sem_V_retry(g_semid, semFull, 1) == -1) {
+        perror("sem_V FULL");
+        return false;
+    }
+    
+    // Zaloguj dostawę
+    int elemNum = inOffset / itemSize;
     char buf[128];
-    P_mutex(g_semid);
-    std::snprintf(buf, sizeof(buf), "Dostarczono %d x %c (stan: A=%d B=%d C=%d D=%d)",
-                  amount, g_type, g_state->a, g_state->b, g_state->c, g_state->d);
-    V_mutex(g_semid);
+    std::snprintf(buf, sizeof(buf), "Dostarczono 1 x %c (offset=%d, elem=%d/%d)",
+                  g_type, inOffset, elemNum, capacity);
     log_raport(g_semid, "DOSTAWCA", buf);
-
-    std::cout << "[DOSTAWCA " << g_type << "] +" << amount << "\n";
-
-    // Raport do magazynu (przez kolejkę komunikatów)
-    SupplierReportMessage rep{};
-    rep.mtype = static_cast<long>(MsgType::SupplierReport);
-    std::snprintf(rep.text, sizeof(rep.text), "Dostawca %c + %d", g_type, amount);
-    if (msgsnd(g_msgid, &rep, sizeof(rep) - sizeof(long), IPC_NOWAIT) == -1 && errno != EAGAIN) {
-        perror("msgsnd report");
-    }
-}
-
-/*
- * check_command() - Sprawdzenie czy przyszła komenda stop
- * 
- * Używa globalnej funkcji ::check_command() z common.h, która
- * sprawdza kolejkę po PID procesu (mtype = getpid()).
- */
-void check_command() {
-    Command cmd = ::check_command(g_msgid);
-    if (cmd == Command::StopDostawcy || cmd == Command::StopAll) {
-        g_stop = 1;
-    }
+    
+    std::cout << "[DOSTAWCA " << g_type << "] +1 (pos=" << elemNum 
+              << "/" << capacity << ")\n";
+    
+    return true;
 }
 
 }  // namespace
 
-/*
- * main() - Punkt wejścia dostawcy
- * 
- * Argumenty:
- *   argv[1] = typ składnika (A/B/C/D) - wymagany
- *   argv[2] = ilość na dostawę (opcjonalnie, domyślnie 1)
- * 
- * Dostawca w pętli:
- *   1. Sprawdza komendy
- *   2. Wykonuje dostawę
- *   3. Losowa przerwa 1-3 sekundy (z okresowym sprawdzaniem komend)
- */
+// Główna funkcja dostawcy
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::cerr << "Uzycie: dostawca <A|B|C|D> [amount]\n";
+        std::cerr << "Uzycie: dostawca <A|B|C|D>\n";
         return 1;
     }
 
-    // Walidacja typu składnika
+    // Sprawdzenie typu
     g_type = argv[1][0];
     if (g_type != 'A' && g_type != 'B' && g_type != 'C' && g_type != 'D') {
         std::cerr << "Błąd: typ dostawcy musi być A, B, C lub D.\n";
         return 1;
     }
 
-    // Walidacja ilości z strtol 
-    int amount = 1;
-    if (argc >= 3) {
-        char *endptr = nullptr;
-        long val = std::strtol(argv[2], &endptr, 10);
-        if (endptr == argv[2] || *endptr != '\0' || val <= 0 || val > 100) {
-            std::cerr << "Błąd: amount musi być liczbą 1-100.\n";
-            return 1;
-        }
-        amount = static_cast<int>(val);
-    }
-
-    // Konfiguracja sygnałów i dołączenie do IPC
+    // Inicjalizacja
     setup_sigaction(handle_signal);
+    
+    // Jeśli dyrektor zginie (np. SIGKILL), dostaniemy SIGTERM
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+    
     attach_ipc();
-
-    // Seed dla losowych przerw (różny dla każdego procesu dzięki XOR z PID)
     srand(static_cast<unsigned>(time(nullptr)) ^ getpid());
 
-    // Główna pętla dostawcy
+    std::cout << "[DOSTAWCA " << g_type << "] Start (pid=" << getpid() 
+              << ", rozmiar=" << size_of(g_type) << "B)\n";
+
+    // Główna pętla
     while (!g_stop) {
-        check_command();
-        if (g_stop) break;
-
-        deliver_once(amount);
-
-        check_command();
-        if (g_stop) break;
-
-        // Losowa przerwa 1-3 sekundy (z okresowym sprawdzaniem komend)
-        int delay = (rand() % 3) + 1;
-        for (int i = 0; i < delay * 10 && !g_stop; i++) {
-            usleep(100000);  // 100ms
-            check_command();
+        if (!deliver_one()) {
+            if (g_stop) break;
+            continue;
+        }
+        if (!g_stop) {
+            int delay = (rand() % 2) + 1;
+            sleep(delay);
         }
     }
 
-    // Log o zakończeniu pracy
+    // Koniec
     char endbuf[64];
-    std::snprintf(endbuf, sizeof(endbuf), "Dostawca %c konczy prace (pid=%d)", g_type, getpid());
+    std::snprintf(endbuf, sizeof(endbuf), "Dostawca %c kończy pracę", g_type);
     log_raport(g_semid, "DOSTAWCA", endbuf);
+    std::cout << "[DOSTAWCA " << g_type << "] Zakończono.\n";
 
-    // Odłączenie od pamięci dzielonej (nie usuwamy zasobów!)
-    if (g_state && shmdt(g_state) == -1) perror("shmdt");
+    // Odłącz się
+    if (g_header && shmdt(g_header) == -1) perror("shmdt");
 
     return 0;
 }

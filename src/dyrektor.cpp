@@ -1,14 +1,6 @@
-/*
- * dyrektor.cpp - Główny proces sterujący fabryką czekolady
- * 
- * Dyrektor jest odpowiedzialny za:
- * - uruchomienie wszystkich procesów potomnych (magazyn, dostawcy, stanowiska)
- * - przyjmowanie poleceń od użytkownika (1-4)
- * - wysyłanie komend do procesów przez kolejkę komunikatów
- * - graceful shutdown i sprzątanie zasobów IPC
- * 
- * Autor: Krzysztof Pietrzak (156721)
- */
+// Dyrektor - główny proces sterujący fabryką
+// Uruchamia wszystkie procesy (magazyn, dostawcy, stanowiska)
+// Odbiera polecenia od użytkownika
 
 #include "../include/common.h"
 
@@ -22,204 +14,139 @@
 
 namespace {
 
-// --- Zmienne globalne (w anonimowej przestrzeni nazw = prywatne dla tego pliku) ---
+// Zmienne globalne
+std::vector<pid_t> g_children;  // PIDy wszystkich procesów
+int g_semid = -1;   // ID semaforów
+int g_shmid = -1;   // ID pamięci dzielonej
 
-std::vector<pid_t> g_children;  // PIDy wszystkich procesów potomnych
-                                 // Kolejność: [0]=magazyn, [1-4]=dostawcy A,B,C,D, [5-6]=stanowiska 1,2
-
-int g_msgid = -1;   // ID kolejki komunikatów
-int g_semid = -1;   // ID zestawu semaforów  
-int g_shmid = -1;   // ID segmentu pamięci dzielonej
-
-volatile sig_atomic_t g_stop = 0;  // Flaga zakończenia (ustawiana przez handler sygnału)
-                                    // volatile sig_atomic_t jest bezpieczne w handlerze
-
-// Handler sygnału - tylko ustawia flagę, nic więcej
-// (w handlerze nie wolno robić skomplikowanych rzeczy, nawet printf może zawiesić program)
-void handle_signal(int) { g_stop = 1; }
-
-// Wypisz błąd i zakończ proces potomny
-// Używam _exit() zamiast exit() bo w procesie po fork() nie chcę wywoływać atexit handlers
 void die_exec(const char *what) {
     perror(what);
     _exit(EXIT_FAILURE);
 }
 
-/**
- * Tworzy nowy proces potomny i uruchamia w nim podany program.
- * 
- * Używa fork() + execv() 
- * PID nowego procesu jest dodawany do g_children.
- * 
- * @param args wektor argumentów: args[0] = ścieżka do programu, args[1..] = argumenty
- * @return PID utworzonego procesu
- */
+// Uruchamia nowy proces i wykonuje program
 pid_t spawn(const std::vector<std::string> &args) {
     pid_t pid = fork();
     
     if (pid < 0) {
-        // fork się nie udał
         die_exec("fork");
     }
     
     if (pid == 0) {
-        // Jesteśmy w procesie potomnym - wykonaj exec
-        // Muszę przekonwertować vector<string> na char*[] dla execv
         std::vector<char*> cargs;
         cargs.reserve(args.size() + 1);
         
         for (const auto &s : args) {
             cargs.push_back(const_cast<char*>(s.c_str()));
         }
-        cargs.push_back(nullptr);  // execv wymaga nullptr na końcu
+        cargs.push_back(nullptr);
         
         execv(args[0].c_str(), cargs.data());
-        
-        // Jeśli execv powróciło, to znaczy że się nie udało
         die_exec(args[0].c_str());
     }
     
-    // Jesteśmy w procesie rodzica - zapamiętaj PID dziecka
     g_children.push_back(pid);
     return pid;
 }
 
-// Generuje klucz IPC - wszystkie procesy muszą używać tego samego klucza
+// Tworzy klucz IPC
 key_t make_key() {
     key_t key = ftok(kIpcKeyPath, kProjId);
     if (key == -1) die_exec("ftok");
     return key;
 }
 
-// Dołącza do istniejących zasobów IPC (utworzonych przez magazyn)
-void attach_ipc() {
+// Łączy się do zasobów IPC z retry
+void attach_ipc([[maybe_unused]] int targetChocolates) {
     key_t key = make_key();
     
-    // Dołącz do kolejki komunikatów (bez IPC_CREAT - musi już istnieć)
-    g_msgid = msgget(key, 0600);
-    if (g_msgid == -1) die_exec("msgget");
+    // Retry przez 3 sekundy
+    constexpr int maxRetries = 30;
+    constexpr int retryDelayUs = 100000;
     
-    // Dołącz do zestawu semaforów
-    g_semid = semget(key, SEM_COUNT, 0600);
-    if (g_semid == -1) die_exec("semget");
-    
-    // Dołącz do pamięci dzielonej
-    g_shmid = shmget(key, sizeof(WarehouseState), 0600);
-    if (g_shmid == -1) die_exec("shmget");
-}
-
-// --- Wysyłanie komend przez kolejkę komunikatów ---
-
-/**
- * Wysyła komendę do konkretnego procesu używając jego PID jako mtype.
- * Dzięki temu każdy proces odbiera tylko wiadomości skierowane do niego,
- * co rozwiązuje problem z broadcastem gdzie tylko jeden proces odbierał wiadomość.
- */
-void send_command_to_pid(Command cmd, pid_t pid) {
-    CommandMessage msg{};
-    msg.mtype = pid;  // mtype = PID procesu docelowego
-    msg.cmd = cmd;
-    
-    if (msgsnd(g_msgid, &msg, sizeof(msg) - sizeof(long), 0) == -1) {
-        perror("msgsnd command");
-    }
-}
-
-// Wysyła komendę do wszystkich procesów potomnych
-void send_command_to_all(Command cmd) {
-    for (pid_t pid : g_children) {
-        if (pid > 0) {
-            send_command_to_pid(cmd, pid);
+    for (int i = 0; i < maxRetries; ++i) {
+        // Próba dołączenia
+        g_semid = semget(key, SEM_COUNT, 0600);
+        if (g_semid != -1) {
+            g_shmid = shmget(key, 0, 0600);
+            if (g_shmid != -1) return;
         }
+        
+        // Jeśli błąd inny niż "nie istnieje" - wyjść
+        if (errno != ENOENT && errno != EINVAL) {
+            die_exec("attach_ipc");
+        }
+        
+        usleep(retryDelayUs);
     }
+    
+    std::cerr << "[DYREKTOR] Timeout: magazyn nie utworzył zasobów IPC.\n";
+    die_exec("attach_ipc timeout");
 }
 
-/**
- * Wysyła komendę do zakresu procesów (np. tylko dostawcy lub tylko stanowiska).
- * 
- * Układ g_children:
- *   [0]     = magazyn
- *   [1-4]   = dostawcy A, B, C, D
- *   [5-6]   = stanowiska 1, 2
- */
-void  send_command_to_range(Command cmd, size_t from, size_t to) {
+// Wysyła sygnał do zakresu procesów
+void send_signal_to_range(int sig, size_t from, size_t to) {
     for (size_t i = from; i < to && i < g_children.size(); ++i) {
         if (g_children[i] > 0) {
-            send_command_to_pid(cmd, g_children[i]);
+            kill(g_children[i], sig);
         }
     }
 }
 
-// --- Sprzątanie zasobów IPC ---
-
-// Usuwa wszystkie zasoby IPC - wywoływane tylko przez dyrektora na koniec!
-// Inne procesy tylko odłączają się (shmdt), ale nie usuwają.
-void remove_ipcs() {
-    if (g_msgid != -1) msgctl(g_msgid, IPC_RMID, nullptr);  // usuń kolejkę
-    if (g_semid != -1) semctl(g_semid, 0, IPC_RMID);        // usuń semafory
-    if (g_shmid != -1) shmctl(g_shmid, IPC_RMID, nullptr);  // usuń pamięć dzieloną
-}
-
-// Czeka na zakończenie wszystkich procesów potomnych (blokujące)
-void wait_children() {
+void send_signal_to_all(int sig) {
     for (pid_t pid : g_children) {
-        if (pid <= 0) continue;
-        int status = 0;
-        waitpid(pid, &status, 0);
+        if (pid > 0) {
+            kill(pid, sig);
+        }
     }
 }
 
-/**
- * Graceful shutdown - zamyka wszystkie procesy w kontrolowany sposób.
- * 
- * Algorytm:
- * 1. Wyślij StopAll do wszystkich procesów
- * 2. Czekaj do 5 sekund aż same się zakończą (grace period)
- * 3. Jeśli któryś nie odpowiedział - wyślij SIGTERM
- * 4. Zbierz wszystkie zombie (waitpid)
- * 
- * Grace period jest ważny! Daje czas magazynowi na zapisanie stanu do pliku
- * przed zakończeniem. Bez tego mógłby dostać SIGTERM w trakcie zapisu.
- */
+// Usuwa wszystkie zasoby IPC
+void remove_ipcs() {
+    if (g_semid != -1) semctl(g_semid, 0, IPC_RMID);
+    if (g_shmid != -1) shmctl(g_shmid, IPC_RMID, nullptr);
+}
+
+// Zatrzymuje wszystkie procesy gracefully
 void graceful_shutdown() {
-    // 1) Wyślij StopAll do wszystkich procesów
-    send_command_to_all(Command::StopAll);
+    // Wysyłanie SIGTERM
+    std::cout << "[DYREKTOR] Wysyłam SIGTERM do wszystkich procesów...\n";
+    send_signal_to_all(SIGTERM);
     
-    // 2) Grace period: czekaj do 5 sekund (10 x 500ms)
-    std::vector<bool> reaped(g_children.size(), false);  // które procesy już się zakończyły
+    // 2) Grace period: czekaj do 5 sekund
+    std::vector<bool> reaped(g_children.size(), false);
 
     for (int i = 0; i < 10; ++i) {
         bool all_done = true;
         
-        // Sprawdź każdy proces czy się już zakończył
         for (size_t j = 0; j < g_children.size(); ++j) {
             pid_t pid = g_children[j];
             if (pid <= 0 || reaped[j]) continue;
 
             int status = 0;
-            pid_t r = waitpid(pid, &status, WNOHANG);  // WNOHANG = nie blokuj
+            pid_t r = waitpid(pid, &status, WNOHANG);
             
             if (r == 0) {
-                all_done = false;  // ten proces jeszcze żyje
+                all_done = false;
             } else if (r == pid) {
-                reaped[j] = true;  // ten się zakończył
+                reaped[j] = true;
             }
         }
         
         if (all_done) {
-            std::cout << "[DYREKTOR] Wszystkie procesy zakończone gracefully.\n";
+            std::cout << "[DYREKTOR] Wszystkie procesy zakończone.\n";
             return;
         }
         
-        usleep(500000);  // czekaj 500ms przed kolejnym sprawdzeniem
+        usleep(500000);
     }
     
-    // 3) Timeout - niektóre procesy nie odpowiedziały, wyślij SIGTERM
-    std::cout << "[DYREKTOR] Timeout - wysyłam SIGTERM do pozostałych procesów.\n";
+    // 3) Timeout - wyślij SIGKILL
+    std::cout << "[DYREKTOR] Timeout - wysyłam SIGKILL.\n";
     for (size_t j = 0; j < g_children.size(); ++j) {
         pid_t pid = g_children[j];
         if (pid <= 0 || reaped[j]) continue;
-        kill(pid, SIGTERM);
+        kill(pid, SIGKILL);
     }
     
     // 4) Zbierz pozostałe zombie
@@ -227,42 +154,57 @@ void graceful_shutdown() {
         pid_t pid = g_children[j];
         if (pid <= 0 || reaped[j]) continue;
         int status = 0;
-        waitpid(pid, &status, 0);  // teraz blokująco
+        waitpid(pid, &status, 0);
     }
 }
 
-/**
- * Uruchamia wszystkie procesy potomne w odpowiedniej kolejności.
- * 
- * WAŻNE: Magazyn musi wystartować pierwszy i zainicjalizować zasoby IPC!
- * Dlatego jest sleep(1) przed uruchomieniem pozostałych procesów.
- */
-void start_processes(int capacity) {
-    // Najpierw magazyn - on tworzy pamięć dzieloną, semafory i kolejkę
-    spawn({"./magazyn", std::to_string(capacity)});
+// Uruchamia wszystkie procesy
+void start_processes(int targetChocolates) {
+    // Magazyn na pierwszym miejscu
+    spawn({"./magazyn", std::to_string(targetChocolates)});
     
-    sleep(1);  // daj magazynowi czas na inicjalizację IPC
+    sleep(1);
     
-    // Teraz dostawcy - każdy dostarcza inny składnik
+    // Dostawcy
     spawn({"./dostawca", "A"});
     spawn({"./dostawca", "B"});
     spawn({"./dostawca", "C"});
     spawn({"./dostawca", "D"});
     
-    // Na końcu stanowiska produkcyjne
-    spawn({"./stanowisko", "1"});  // produkuje czekoladę z A+B+C
-    spawn({"./stanowisko", "2"});  // produkuje czekoladę z A+B+D
+    // Stanowiska
+    spawn({"./stanowisko", "1"});
+    spawn({"./stanowisko", "2"});
 }
 
-/**
- * Główna pętla menu - przyjmuje polecenia od użytkownika.
- * 
- * Polecenia zgodne z treścią zadania:
- * 1 - StopFabryka (zatrzymaj stanowiska)
- * 2 - StopMagazyn
- * 3 - StopDostawcy
- * 4 - StopAll (zapisz stan i zakończ wszystko)
- */
+// Czeka na zakończenie procesów z zakresu
+bool wait_for_range(size_t from, size_t to, int timeout_sec) {
+    std::vector<bool> reaped(g_children.size(), false);
+    
+    for (int i = 0; i < timeout_sec * 2; ++i) {  // 500ms intervals
+        bool all_done = true;
+        
+        for (size_t j = from; j < to && j < g_children.size(); ++j) {
+            pid_t pid = g_children[j];
+            if (pid <= 0 || reaped[j]) continue;
+            
+            int status = 0;
+            pid_t r = waitpid(pid, &status, WNOHANG);
+            
+            if (r == 0) {
+                all_done = false;
+            } else if (r == pid) {
+                reaped[j] = true;
+                g_children[j] = -1;  // oznacz jako zakończony
+            }
+        }
+        
+        if (all_done) return true;
+        usleep(500000);
+    }
+    return false;
+}
+
+// Główna pętla menu
 void menu_loop() {
     std::cout << "Polecenie dyrektora (1-4, q=quit):\n";
     std::cout << "  1 - StopFabryka (zatrzymaj stanowiska)\n";
@@ -275,29 +217,68 @@ void menu_loop() {
 
     while (true) {
         std::cout << ">  ";
-        if (!std::getline(std::cin, line)) break;  // EOF lub błąd
+        if (!std::getline(std::cin, line)) break;
         
-        if (line.empty()) continue;  // pomiń puste linie
+        if (line.empty()) continue;
         
         char choice = line[0];
 
         // Układ g_children: [0]=magazyn, [1-4]=dostawcy A,B,C,D, [5-6]=stanowiska 1,2
         if (choice == '1') {
-            log_raport(g_semid, "DYREKTOR", "Wysyłam StopFabryka (zatrzymanie stanowisk)");
-            send_command_to_range(Command::StopFabryka, 5, 7);  // stanowiska [5,6]
+            log_raport(g_semid, "DYREKTOR", "Wysyłam SIGTERM do stanowisk");
+            send_signal_to_range(SIGTERM, 5, 7);  // stanowiska [5,6]
         }
         else if (choice == '2') {
-            log_raport(g_semid, "DYREKTOR", "Wysyłam StopMagazyn");
-            send_command_to_pid(Command::StopMagazyn, g_children[0]);  // magazyn [0]
+            // StopMagazyn - SIGTERM = zakończ BEZ zapisu stanu
+            log_raport(g_semid, "DYREKTOR", "Wysyłam SIGTERM do magazynu (bez zapisu)");
+            if (g_children.size() > 0 && g_children[0] > 0) {
+                kill(g_children[0], SIGTERM);
+            }
         }
         else if (choice == '3') {
-            log_raport(g_semid, "DYREKTOR", "Wysyłam StopDostawcy");
-            send_command_to_range(Command::StopDostawcy, 1, 5);  // dostawcy [1,2,3,4]
+            log_raport(g_semid, "DYREKTOR", "Wysyłam SIGTERM do dostawców");
+            send_signal_to_range(SIGTERM, 1, 5);  // dostawcy [1,2,3,4]
         }
         else if (choice == '4') {
-            log_raport(g_semid, "DYREKTOR", "Wysyłam StopAll (zapis stanu i zakończenie)");
-            send_command_to_all(Command::StopAll);
-            break;  // wyjdź z pętli menu
+            // StopAll - DETERMINISTYCZNY zapis stanu
+            // Sekwencja: stanowiska -> dostawcy -> magazyn (z zapisem)
+            log_raport(g_semid, "DYREKTOR", "StopAll - zatrzymuję stanowiska...");
+            
+            // 1) Zatrzymaj stanowiska (konsumentów)
+            send_signal_to_range(SIGTERM, 5, 7);
+            if (!wait_for_range(5, 7, 5)) {
+                std::cout << "[DYREKTOR] Timeout stanowisk - SIGKILL\n";
+                for (size_t j = 5; j < 7 && j < g_children.size(); ++j) {
+                    if (g_children[j] > 0) kill(g_children[j], SIGKILL);
+                }
+                wait_for_range(5, 7, 2);
+            }
+            
+            // 2) Zatrzymaj dostawców (producentów)
+            log_raport(g_semid, "DYREKTOR", "StopAll - zatrzymuję dostawców...");
+            send_signal_to_range(SIGTERM, 1, 5);
+            if (!wait_for_range(1, 5, 5)) {
+                std::cout << "[DYREKTOR] Timeout dostawców - SIGKILL\n";
+                for (size_t j = 1; j < 5 && j < g_children.size(); ++j) {
+                    if (g_children[j] > 0) kill(g_children[j], SIGKILL);
+                }
+                wait_for_range(1, 5, 2);
+            }
+            
+            // 3) Teraz magazyn może bezpiecznie zapisać stan
+            log_raport(g_semid, "DYREKTOR", "StopAll - zapisuję stan magazynu...");
+            if (g_children.size() > 0 && g_children[0] > 0) {
+                kill(g_children[0], SIGUSR1);  // magazyn zapisze stan i zakończy
+                
+                // WAŻNE: Czekaj na zakończenie magazynu PRZED graceful_shutdown()
+                // Zapobiega wyścigowi SIGUSR1 vs SIGTERM
+                if (!wait_for_range(0, 1, 5)) {
+                    std::cout << "[DYREKTOR] Timeout magazynu - SIGKILL\n";
+                    kill(g_children[0], SIGKILL);
+                    wait_for_range(0, 1, 2);
+                }
+            }
+            break;
         }
         else if (choice == 'q' || choice == 'Q') {
             break;
@@ -308,57 +289,50 @@ void menu_loop() {
     }
 }
 
-}  // koniec anonimowej przestrzeni nazw
-
-// ============================================================================
-// FUNKCJA MAIN
-// ============================================================================
+}  // namespace
 
 int main(int argc, char **argv) {
-    // --- Parsowanie argumentów ---
-    int capacity = kDefaultCapacity;
+    int targetChocolates = kDefaultChocolates;
     
     if (argc > 1) {
-        // Walidacja wejścia z użyciem strtol 
-        // strtol jest bezpieczniejsze niż atoi bo pozwala wykryć błędy
         char *endptr = nullptr;
         long val = std::strtol(argv[1], &endptr, 10);
         
-        // Sprawdź czy cały string był liczbą
         if (endptr == argv[1] || *endptr != '\0') {
             std::cerr << "Błąd: '" << argv[1] << "' nie jest poprawną liczbą.\n";
-            std::cerr << "Użycie: " << argv[0] << " [capacity]\n";
+            std::cerr << "Użycie: " << argv[0] << " [liczba_czekolad]\n";
             return 1;
         }
         
-        // Sprawdź zakres
         if (val <= 0 || val > 10000) {
-            std::cerr << "Błąd: capacity musi być w zakresie 1-10000.\n";
+            std::cerr << "Błąd: liczba czekolad musi być w zakresie 1-10000.\n";
             return 1;
         }
         
-        capacity = static_cast<int>(val);
+        targetChocolates = static_cast<int>(val);
     }
 
-    // --- Inicjalizacja ---
-    setup_sigaction(handle_signal);  // obsługa SIGINT, SIGTERM
-    ensure_ipc_key();  // utwórz plik ipc.key jeśli nie istnieje
+    ensure_ipc_key();
 
-    // --- Uruchom procesy potomne ---
-    start_processes(capacity);
+    std::cout << "[DYREKTOR] Start fabryki dla " << targetChocolates 
+              << " czekolad na pracownika\n";
+    std::cout << "[DYREKTOR] Pamięć: " << calc_shm_size(targetChocolates) << " bajtów\n";
 
-    // --- Dołącz do IPC (utworzonych przez magazyn) ---
-    attach_ipc();
+    // Uruchom procesy potomne
+    start_processes(targetChocolates);
 
-    // --- Pętla menu ---
+    // Dołącz do IPC
+    attach_ipc(targetChocolates);
+
+    // Pętla menu
     menu_loop();
 
-    // --- Zakończenie ---
-    // graceful_shutdown() daje czas magazynowi na zapisanie stanu
+    // Zakończenie
     graceful_shutdown();
 
-    // Usuń zasoby IPC - tylko dyrektor to robi!
+    // Usuń zasoby IPC
     remove_ipcs();
 
+    std::cout << "[DYREKTOR] Zakończono.\n";
     return 0;
 }
