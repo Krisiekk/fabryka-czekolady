@@ -229,10 +229,12 @@ void menu_loop() {
             send_signal_to_range(SIGTERM, 5, 7);  // stanowiska [5,6]
         }
         else if (choice == '2') {
-            // StopMagazyn - SIGTERM = zakończ BEZ zapisu stanu
-            log_raport(g_semid, "DYREKTOR", "Wysyłam SIGTERM do magazynu (bez zapisu)");
-            if (g_children.size() > 0 && g_children[0] > 0) {
-                kill(g_children[0], SIGTERM);
+            // StopMagazyn - ustaw SEM_WAREHOUSE_ON=0 (magazyn sam się zakończy)
+            log_raport(g_semid, "DYREKTOR", "Ustawiam SEM_WAREHOUSE_ON=0 (zamykam magazyn)");
+            semun arg{};
+            arg.val = 0;
+            if (semctl(g_semid, SEM_WAREHOUSE_ON, SETVAL, arg) == -1) {
+                perror("semctl SEM_WAREHOUSE_ON=0");
             }
         }
         else if (choice == '3') {
@@ -240,7 +242,7 @@ void menu_loop() {
             send_signal_to_range(SIGTERM, 1, 5);  // dostawcy [1,2,3,4]
         }
         else if (choice == '4') {
-            // StopAll - DETERMINISTYCZNY zapis stanu
+            // StopAll - zapis stanu
             // Sekwencja: stanowiska -> dostawcy -> magazyn (z zapisem)
             log_raport(g_semid, "DYREKTOR", "StopAll - zatrzymuję stanowiska...");
             

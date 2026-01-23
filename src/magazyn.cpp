@@ -38,7 +38,7 @@ void init_ipc(int targetChocolates) {
     key_t key = make_key();
     size_t shmSize = calc_shm_size(targetChocolates);
 
-    // Pamięć dzielona - IPC_EXCL ensures we create fresh segment
+    // Pamięć dzielona - IPC_EXCL 
     g_shmid = shmget(key, shmSize, IPC_CREAT | IPC_EXCL | 0600);
     bool fresh = true;
 
@@ -98,14 +98,15 @@ void init_ipc(int targetChocolates) {
         if (semctl(g_semid, SEM_IN_B, SETVAL, arg) == -1) die_perror("semctl SEM_IN_B");
         if (semctl(g_semid, SEM_IN_C, SETVAL, arg) == -1) die_perror("semctl SEM_IN_C");
         if (semctl(g_semid, SEM_IN_D, SETVAL, arg) == -1) die_perror("semctl SEM_IN_D");
-
-        // WAREHOUSE_ON = 1 (magazyn otwarty)
-        arg.val = 1;
-        if (semctl(g_semid, SEM_WAREHOUSE_ON, SETVAL, arg) == -1) die_perror("semctl SEM_WAREHOUSE_ON");
         if (semctl(g_semid, SEM_OUT_A, SETVAL, arg) == -1) die_perror("semctl SEM_OUT_A");
         if (semctl(g_semid, SEM_OUT_B, SETVAL, arg) == -1) die_perror("semctl SEM_OUT_B");
         if (semctl(g_semid, SEM_OUT_C, SETVAL, arg) == -1) die_perror("semctl SEM_OUT_C");
         if (semctl(g_semid, SEM_OUT_D, SETVAL, arg) == -1) die_perror("semctl SEM_OUT_D");
+
+        // WAREHOUSE_ON = 1 (magazyn otwarty)
+        arg.val = 1;
+        if (semctl(g_semid, SEM_WAREHOUSE_ON, SETVAL, arg) == -1) die_perror("semctl SEM_WAREHOUSE_ON");
+
     }
 }
 
@@ -124,7 +125,6 @@ void load_state_from_file() {
     int target, a, b, c, d;
     if (sscanf(buf, "%d %d %d %d %d", &target, &a, &b, &c, &d) != 5) return;
     
-    // === SANITY-CHECK: clamp do [0, capacity] ===
     // Chroni przed uszkodzonym/złośliwym plikiem stanu
     auto clamp = [](int val, int minv, int maxv) {
         return (val < minv) ? minv : (val > maxv) ? maxv : val;
@@ -196,7 +196,7 @@ void load_state_from_file() {
 
 // Zapisuje stan magazynu do pliku
 void save_state_to_file() {
-    // Odczytaj stan z semaforów (atomowe operacje, nie potrzeba mutexu)
+    // Odczytaj stan z semaforów (atomowe operacje, nie potrzeba mutexu) bo tylko odczytuje dane 
     int a = semctl(g_semid, SEM_FULL_A, GETVAL);
     int b = semctl(g_semid, SEM_FULL_B, GETVAL);
     int c = semctl(g_semid, SEM_FULL_C, GETVAL);
@@ -247,8 +247,16 @@ void print_state() {
 }
 
 // Główna pętla magazynu - wypisuje stan co 2 sekundy
+// Kończy gdy SEM_WAREHOUSE_ON=0 lub otrzyma sygnał
 void loop() {
     while (!g_stop) {
+        // Sprawdź semafor-bramkę (tak jak inne procesy)
+        int warehouseOn = semctl(g_semid, SEM_WAREHOUSE_ON, GETVAL);
+        if (warehouseOn == 0) {
+            std::cout << "[MAGAZYN] SEM_WAREHOUSE_ON=0, kończę pracę\n";
+            break;
+        }
+        
         print_state();
         
         // Czekamy 2 sekundy lub do sygnału
@@ -324,14 +332,8 @@ int main(int argc, char **argv) {
     // Główna pętla
     loop();
 
-    // === ZAMKNIĘCIE MAGAZYNU ===
-    // Ustaw SEM_WAREHOUSE_ON = 0 - sygnał dla dostawców i stanowisk
-    semun arg{};
-    arg.val = 0;
-    if (semctl(g_semid, SEM_WAREHOUSE_ON, SETVAL, arg) == -1) {
-        perror("semctl SEM_WAREHOUSE_ON=0");
-    }
-    log_raport(g_semid, "MAGAZYN", "Magazyn zamknięty (SEM_WAREHOUSE_ON=0)");
+    // Log zamknięcia
+    log_raport(g_semid, "MAGAZYN", "Magazyn zamknięty");
 
     // Zapis stanu TYLKO jeśli otrzymaliśmy SIGUSR1 (polecenie 4)
     if (g_save_on_exit) {
@@ -348,10 +350,14 @@ int main(int argc, char **argv) {
 
         save_state_to_file();
     } else {
-        log_raport(g_semid, "MAGAZYN", "Zakończenie bez zapisu stanu (SIGTERM)");
+        log_raport(g_semid, "MAGAZYN", "Zakończenie bez zapisu stanu");
     }
     
-    cleanup_ipc();
+    // Odłącz pamięć (ale NIE usuwaj IPC - to robi dyrektor)
+    if (g_header) {
+        shmdt(g_header);
+        g_header = nullptr;
+    }
 
     std::cout << "[MAGAZYN] Zakończono.\n";
     return 0;
