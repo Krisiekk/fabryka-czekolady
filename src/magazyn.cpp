@@ -187,6 +187,11 @@ void load_state_from_file() {
     std::memset(segment_B(g_header), 'B', b * kSizeB);
     std::memset(segment_C(g_header), 'C', c * kSizeC);
     std::memset(segment_D(g_header), 'D', d * kSizeD);
+    
+    // Log dla testów - potwierdza wczytanie stanu
+    char logbuf[256];
+    snprintf(logbuf, sizeof(logbuf), "Wczytano stan z pliku (A=%d, B=%d, C=%d, D=%d)", a, b, c, d);
+    log_raport(g_semid, "MAGAZYN", logbuf);
 }
 
 // Zapisuje stan magazynu do pliku

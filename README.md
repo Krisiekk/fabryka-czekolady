@@ -25,13 +25,12 @@ W systemie działają następujące procesy:
 - **2 stanowiska produkcyjne** – produkują czekoladę.
 
 Procesy komunikują się przy użyciu:
-- semaforów systemowych,
-- pamięci dzielonej,
-- kolejek komunikatów,
-- sygnałów systemowych.
+- semaforów systemowych (19 semaforów),
+- pamięci dzielonej (ring buffer z offsetami w semaforach),
+- sygnałów systemowych (SIGTERM, SIGUSR1).
 
 Przebieg symulacji zapisywany jest do pliku tekstowego, a stan magazynu
-jest zapisywany przy zamykaniu systemu i odtwarzany przy ponownym uruchomieniu.
+jest zapisywany przy zamykaniu systemu (komenda StopAll) i odtwarzany przy ponownym uruchomieniu.
 
 ---
 

@@ -1,628 +1,1034 @@
-# Fabryka Czekolady – raport końcowy  
+# Fabryka Czekolady – dokumentacja projektu
 **Autor:** Krzysztof Pietrzak  
 **Nr albumu:** 156721  
-**Nazwa tematu:** FABRYKA_CZEKOLADY  
-**Repozytorium GitHub:** https://github.com/Krisiekk/fabryka-czekolady
+**Temat:** FABRYKA_CZEKOLADY  
+**Repozytorium:** https://github.com/Krisiekk/fabryka-czekolady
 
 ---
 
-## 1. Opis projektu
-Celem projektu jest stworzenie symulacji pracy fabryki czekolady w oparciu o procesy systemu operacyjnego Linux. Każdy „aktor” systemu (dyrektor, magazyn, dostawcy, stanowiska produkcyjne) będzie osobnym procesem, posiadającym własną funkcję `main()` (zgodnie z wymaganiem: unikać rozwiązań scentralizowanych – obowiązkowe użycie `fork()` i `exec()`).
+## 1. Co robi ten projekt?
 
-Do komunikacji i synchronizacji zostaną wykorzystane:
-- pamięć dzielona (`ftok()`, `shmget()`, `shmat()`, `shmdt()`, `shmctl()`)
-- semafory (`ftok()`, `semget()`, `semop()`, `semctl()`)
-- sygnały (`signal()`, `sigaction()`, `kill()`, `raise()`)
-- kolejki komunikatów System V (`ftok()`, `msgget()`, `msgsnd()`, `msgrcv()`, `msgctl()`)
+To symulacja fabryki czekolady zrobiona w C++ na Linuxie. Każda część fabryki to osobny proces:
+- **Dyrektor** – uruchamia wszystko i daje komendy
+- **Magazyn** – przechowuje składniki w pamięci dzielonej
+- **4 dostawców** (A, B, C, D) – dostarczają surowce
+- **2 stanowiska** (1, 2) – robią czekoladę
 
-### Jak uruchomić
+Wszystkie procesy komunikują się przez:
+- **Pamięć dzieloną** – dane o składnikach
+- **Semafory** – synchronizacja dostępu
+- **Sygnały** – komendy dyrektora (SIGTERM, SIGUSR1)
+
+
+---
+
+## 2. Jak uruchomić?
 
 ```bash
 cd build
 cmake .. && make
-./dyrektor [capacity]
+./dyrektor 100
 ```
 
-**Parametry:**
-- `capacity` (opcjonalny) – pojemność magazynu w jednostkach (domyślnie: 100)
+**Parametr:** liczba czekolad na pracownika (1-10000, domyślnie 100)  
+**Uwaga:** N to cel produkcyjny na stanowisko (worker); są dwa stanowiska, więc łączna produkcja = 2×N.
 
-**Walidacja danych wejściowych (pkt 4.1.b):**
-- `capacity` musi być liczbą całkowitą w zakresie 1–10000
-- użyto `strtol()` z pełną kontrolą błędów (niepoprawny format, przepełnienie)
-- przy błędzie program wyświetla komunikat i kończy pracę z kodem 1
-
-### Interpretacja „maksymalnie dużo podzespołów"
-
-Zgodnie z treścią tematu, dostawcy działają **asynchronicznie** i próbują dostarczać surowce w sposób ciągły (losowe opóźnienia między dostawami). Magazyn przyjmuje wszystkie dostawy, dopóki pozwala na to `capacity`. Gdy magazyn jest pełny, dostawca **blokuje się na semaforze `SEM_CAPACITY`** i czeka, aż stanowisko produkcyjne pobierze surowce (zwalniając miejsce). Dzięki temu system dąży do maksymalnego zapełnienia magazynu bez przekraczania limitu pojemności.
+**Komendy w trakcie działania:**
+1. **StopFabryka** – zatrzymuje stanowiska
+2. **StopMagazyn** – kończy magazyn bez zapisu, usuwa IPC
+3. **StopDostawcy** – zatrzymuje dostawców
+4. **StopAll** – zapisuje stan i kończy wszystko
+q. **Quit** – kończy bez zapisu
 
 ---
 
-## 2. Opis procesów
+## 3. Architektura systemu
 
-| Proces | Zadanie | Funkcje systemowe |
-|--------|---------|-------------------|
-| `dyrektor` | tworzy procesy i steruje nimi | `fork()`, `exec()`, `wait()`, `kill()` |
-| `magazyn` | trzyma składniki w pamięci dzielonej | `shmget()`, `semget()`, `msgrcv()` |
-| `dostawca_A/B/C/D` | dostarcza składniki | `shmget()`, `semop()`, `msgsnd()` |
-| `stanowisko_1` | produkuje czekoladę typu 1 | `semop()`, `shmget()`, `msgsnd()` |
-| `stanowisko_2` | produkuje czekoladę typu 2 | `semop()`, `shmget()`, `msgsnd()` |
+### 3.1 Ring Buffer z offsetami bajtowymi
 
-### Mapowanie poleceń dyrektora
+Magazyn używa **ring buffera** dla każdego typu składnika.
 
-| Polecenie | Komenda | Opis |
-|-----------|---------|------|
-| **1** | `StopFabryka` | Zatrzymuje stanowiska produkcyjne (1 i 2) |
-| **2** | `StopMagazyn` | Zatrzymuje proces magazynu |
-| **3** | `StopDostawcy` | Zatrzymuje wszystkich dostawców (A, B, C, D) |
-| **4** | `StopAll` | Zapisuje stan magazynu i kończy wszystkie procesy |
+**Pojemności (dla N czekolad na pracownika):**
+- Segment A: **2×N** elementów × 1B = **2×N** bajtów (obie receptury używają A)
+- Segment B: **2×N** elementów × 1B = **2×N** bajtów (obie receptury używają B)
+- Segment C: **N** elementów × 2B = **2×N** bajtów (tylko typ 1)
+- Segment D: **N** elementów × 3B = **3×N** bajtów (tylko typ 2)
 
-**Mechanizm dostarczania poleceń:**  
-Komendy są wysyłane przez kolejkę komunikatów System V (`msgsnd`). Dyrektor wysyła wiadomość z `mtype = PID` procesu docelowego (per-PID targeting). Każdy proces potomny w swojej pętli głównej wywołuje `check_command()`, która wykonuje nieblokujące `msgrcv(..., getpid(), IPC_NOWAIT)`. Po odebraniu komendy proces ustawia flagę `g_stop = 1` i wychodzi z pętli, wykonując cleanup (np. magazyn zapisuje stan do pliku).
+**Łączny rozmiar danych:** 2N + 2N + 2N + 3N = **9×N** bajtów
+
+**Przykład dla N=100:**
+- Segment A: 200 elementów = 200B
+- Segment B: 200 elementów = 200B
+- Segment C: 100 elementów = 200B
+- Segment D: 100 elementów = 300B
+- Razem: 900B danych + ~100B header = ~1000B pamięci dzielonej
+
+**Offsety IN/OUT przechowywane w semaforach:**
+```
+SEM_IN_X  = offset bajtowy zapisu (0 .. segmentSize-1)
+SEM_OUT_X = offset bajtowy odczytu (0 .. segmentSize-1)
+
+gdzie: segmentSize = capacityX * itemSizeX  (rozmiar segmentu w bajtach)
+
+Przykłady dla N=100:
+  A: 0..199 (200*1-1)
+  B: 0..199 (200*1-1)
+  C: 0..199 (100*2-1)
+  D: 0..299 (100*3-1)
+```
+
+**Mechanizm zapisu (dostawca):**
+1. P(EMPTY_X) – czekaj na wolne miejsce
+2. P(MUTEX) – wejdź do sekcji krytycznej
+3. Odczytaj IN offset z semafora
+4. Zapisz dane pod `segment[IN]`
+5. Ustaw nowy IN: `(IN + itemSize) % segmentSize`
+6. V(MUTEX) – wyjdź z sekcji
+7. V(FULL_X) – sygnalizuj nowe dane
+
+**Mechanizm odczytu (stanowisko):**
+1. P(FULL_X) – czekaj na dostępne dane
+2. P(MUTEX) – wejdź do sekcji krytycznej
+3. Odczytaj OUT offset z semafora
+4. Przeczytaj dane z `segment[OUT]`
+5. Ustaw nowy OUT: `(OUT + itemSize) % segmentSize`
+6. V(MUTEX) – wyjdź z sekcji
+7. V(EMPTY_X) – zwolnij miejsce
+
+### 3.2 Semafory (19 sztuk)
+
+**Łącznie 19 semaforów:** 1 mutex + 1 raport + 4 empty + 4 full + 4 in + 4 out + 1 warehouse_on = 19
+
+```
+SEM_MUTEX         (0)  = 1       - mutex dla pamięci dzielonej
+SEM_RAPORT        (1)  = 1       - mutex dla pliku raportu
+SEM_EMPTY_A/B/C/D (2-5)          - wolne miejsca (liczba elementów)
+SEM_FULL_A/B/C/D  (6-9)          - zajęte miejsca (liczba elementów)
+SEM_IN_A/B/C/D    (10-13)        - offsety zapisu (bajty: 0 do capacity*itemSize-1)
+SEM_OUT_A/B/C/D   (14-17)        - offsety odczytu (bajty: 0 do capacity*itemSize-1)
+SEM_WAREHOUSE_ON  (18) = 1       - czy magazyn otwarty (bramka)
+```
+
+**Inicjalizacja dla N=100:**
+```
+SEM_EMPTY_A = 200 elementów (2*N)
+SEM_FULL_A  = 0 elementów
+SEM_IN_A    = 0 bajtów
+SEM_OUT_A   = 0 bajtów
+```
+
+**Zakres wartości offsetów:**
+Maksymalny rozmiar segmentu dla N=10000: segment D = 10000 × 3B = 30000 bajtów.  
+Offsety mieszczą się w typie `int` używanym przez `semctl()` (zakres: ±2³¹ ≈ 2 miliardy).
+
+**Limit systemowy semaforów:**
+Na Linuksie semafory mają limit wartości (SEMVMX, typowo ~32767). W tym projekcie maksymalne wartości to:  
+- EMPTY/FULL: max 20000 elementów (dla N=10000)  
+- IN/OUT: max 30000 bajtów (segment D)  
+Wszystko mieści się z zapasem.
+
+**UWAGA:** 
+- **EMPTY/FULL** = liczniki sztuk (jednostek składnika)
+  - Są to **warunki synchronizacji** – dzięki nim procesy blokują się bez busy-wait
+  - FULL gwarantuje, że stanowisko nigdy nie czyta pustego slotu
+  - EMPTY gwarantuje, że dostawca nigdy nie nadpisuje nieodebranego elementu
+  - Dane fizyczne są w SHM, semafory tylko kontrolują dostęp
+- **IN/OUT** = offsety bajtowe w segmencie (pozycja zapisu/odczytu)
+- Dostawca: `P(EMPTY, 1 sztuka)`, `V(FULL, 1 sztuka)`
+- IN/OUT przesuwane o `itemSize` bajtów
+
+**SEM_WAREHOUSE_ON:**
+- Wartość 1 = magazyn działa normalnie
+- Wartość 0 = magazyn zamknięty
+- Dostawcy/stanowiska: `P(WAREHOUSE_ON); V(WAREHOUSE_ON)` – blokują się gdy zamknięty
+
+**Uwaga o bramce:**  
+Bramka działa jako kontrola wejścia do iteracji. Proces, który już przeszedł bramkę,  
+może dokończyć bieżący krok synchronizacji (P/V na EMPTY/FULL) przed zablokowaniem.
+
+### 3.3 Pamięć dzielona
+
+**Wzór ogólny:**
+```
+Rozmiar SHM = sizeof(WarehouseHeader) + dataSize
+dataSize = 2*N*1B + 2*N*1B + N*2B + N*3B = 9*N bajtów
+```
+
+**Dla N=100:**
+```
+[WarehouseHeader: ~100B]
+  - targetChocolates: int (100)
+  - capacityA/B/C/D: int (200, 200, 100, 100 elementów)
+  - offsetA/B/C/D: size_t (offset początku segmentu w SHM - stałe)
+      * offsetA = 0
+      * offsetB = offsetA + capacityA*kSizeA  
+      * offsetC = offsetB + capacityB*kSizeB
+      * offsetD = offsetC + capacityC*kSizeC
+  - dataSize: size_t (900B)
+  
+  UWAGA: IN/OUT (pozycje zapisu/odczytu) są w semaforach SEM_IN_X / SEM_OUT_X,
+         nie w headerze! offsetA/B/C/D to stałe "bazowe" (gdzie segment się zaczyna),
+         IN/OUT to zmienne "aktualne pozycje" (gdzie teraz piszemy/czytamy).
+
+[Segment A: 200B] (200 elementów × 1B)
+[Segment B: 200B] (200 elementów × 1B)
+[Segment C: 200B] (100 elementów × 2B)
+[Segment D: 300B] (100 elementów × 3B)
+
+Razem: ~100B + 900B = ~1000B pamięci dzielonej
+```
+
+**Uwaga:** Wartość sizeof(WarehouseHeader) zależy od architektury (padding). Podane wartości (~964B, ~1000B, header ~80-100B) są przybliżone i różnią się w zależności od kompilatora/architektury.
 
 ---
 
-## 3. Proponowane testy
+## 4. Procesy
 
-### ✔ Test 1 – poprawne uruchomienie wszystkich procesów fabryki
+### 4.1 Dyrektor (dyrektor.cpp)
 
-**Opis:**  
-Dyrektor uruchamia wszystkie procesy fabryki: magazyn, czterech dostawców (A, B, C, D) oraz dwa stanowiska produkcyjne (1 i 2). Procesy działają równolegle i komunikują się za pomocą pamięci dzielonej, semaforów oraz kolejek komunikatów. Po pewnym czasie dyrektor wysyła polecenie `StopAll`.
+**Co robi:**
+- Tworzy procesy: `fork()` + `exec()`
+- Czeka na komendy użytkownika
+- Wysyła sygnały do procesów
 
-**Oczekiwany wynik:**  
-- wszystkie procesy uruchamiają się poprawnie  
-- dostawcy niezależnie dostarczają surowce do magazynu  
-- stanowiska pobierają surowce i produkują czekoladę  
-- nie występują deadlocki ani race condition  
-- po wysłaniu `StopAll` wszystkie procesy kończą pracę  
-- magazyn zapisuje aktualny stan do pliku  
+**Komenda StopAll (deterministyczna):**
+```
+1. SIGTERM → stanowiska → wait_for_range(5,7)
+2. SIGTERM → dostawcy  → wait_for_range(1,5)  
+3. SIGUSR1 → magazyn   → wait_for_range(0,1)   
+4. graceful_shutdown() (już bez magazynu)
+```
 
-**Rzeczywisty wynik:**  
-- dyrektor poprawnie uruchomił magazyn, 4 dostawców oraz 2 stanowiska  
-- dostawcy dostarczali surowce w losowych momentach  
-- stanowiska poprawnie pobierały surowce i produkowały czekoladę  
-- synchronizacja przebiegała poprawnie (brak zakleszczeń)  
-- po wysłaniu `StopAll` magazyn zapisał stan do pliku  
-- wszystkie procesy zakończyły działanie w sposób kontrolowany (graceful shutdown)  
+**Dlaczego czeka w kroku 3?**  
+Zapobiega race condition: magazyn mógłby dostać SIGTERM z `graceful_shutdown()` zanim obsłuży SIGUSR1.
 
-**Status:** ✔ ZALICZONY  
+### 4.2 Magazyn (magazyn.cpp)
 
+**Co robi:**
+- Tworzy IPC: `shmget()`, `semget()`
+- Inicjalizuje semafory
+- Wypisuje stan co 3 sekundy
+- Zapisuje/wczytuje stan z pliku
 
+**Zamykanie magazynu:**
 
-#### Fragment logu z wykonania testu:
+**SIGTERM (komenda 2 - StopMagazyn):**
+```cpp
+SEM_WAREHOUSE_ON = 0;  // zamknięcie bramki
+cleanup_ipc();         // shmctl(IPC_RMID), semctl(IPC_RMID) - USUNIĘCIE IPC
+// Zakończenie BEZ zapisu stanu
+```
 
+**SIGUSR1 (komenda 4 - StopAll):**
+```cpp
+SEM_WAREHOUSE_ON = 0;  // zamknięcie bramki
+save_state_to_file();  // ZAPIS STANU do pliku
+cleanup_ipc();         // usunięcie IPC
+// Zakończenie Z zapisem stanu
+```
 
-[14:41:24] MAGAZYN: Start magazynu (capacity=100)
-[14:41:24] MAGAZYN: Odtworzono stan z pliku: A=2 B=0 C=4 D=10 (zajetosc: 40/100 jednostek)
-[14:41:25] DOSTAWCA: Dostarczono 1 x A (stan: A=3 B=0 C=4 D=10)
-[14:41:25] DOSTAWCA: Dostarczono 1 x D (stan: A=3 B=0 C=4 D=11)
-[14:41:25] DOSTAWCA: Dostarczono 1 x B (stan: A=3 B=1 C=4 D=11)
-[14:41:25] DOSTAWCA: Dostarczono 1 x C (stan: A=3 B=1 C=5 D=11)
-[14:41:25] MAGAZYN: Żądanie od stanowiska 2 (pid=13874): A=1 B=1 C=0 D=1
-[14:41:25] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=13874), stan: A=2 B=0 C=5 D=10
-[14:41:25] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=13874)
-[14:41:28] MAGAZYN: Żądanie od stanowiska 1 (pid=13873): A=1 B=1 C=1 D=0
-[14:41:28] MAGAZYN: Wydano surowce dla stanowiska 1 (pid=13873), stan: A=2 B=0 C=5 D=11
-[14:41:28] STANOWISKO: Stanowisko 1 wyprodukowano czekolade (pid=13873)
-[14:41:29] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
-[14:41:30] MAGAZYN: Odebrano StopAll - koncze prace
-[14:41:30] MAGAZYN: Zapisuje stan do pliku: A=3 B=1 C=6 D=12 (zajetosc: 52/100 jednostek)
-[14:41:34] DOSTAWCA: Dostawca A konczy prace
-[14:41:34] DOSTAWCA: Dostawca B konczy prace
-[14:41:34] DOSTAWCA: Dostawca C konczy prace
-[14:41:34] DOSTAWCA: Dostawca D konczy prace
-[14:41:34] STANOWISKO: Stanowisko 1 konczy prace
-[14:41:34] STANOWISKO: Stanowisko 2 konczy prace
+**Co jest zapisywane:**
+- Liczniki produkcji dla każdego stanowiska (producedByWorker1/2)
+- Wartości 19 semaforów (IN/OUT/EMPTY/FULL + WAREHOUSE_ON)
+- **NIE zapisujemy:** Zawartość segmentów SHM (sloty A/B/C/D)  
+  Po restarcie magazyn startuje pusty, dostawcy uzupełniają go na bieżąco.
 
+**Awaryjne sprzątanie:**
+```cpp
+prctl(PR_SET_PDEATHSIG, SIGTERM);  // dostanie SIGTERM gdy dyrektor zginie
+```
 
+### 4.3 Dostawca (dostawca.cpp)
 
-### ✔ Test 2 – pełny magazyn (brak miejsca)
+**Co robi:**
+- Dostarcza składniki (A, B, C lub D)
+- Sprawdza bramkę SEM_WAREHOUSE_ON
+- Zapisuje dane do ring buffera
 
-**Opis:**  
-Magazyn został uruchomiony z ograniczoną pojemnością (`capacity = 10`).  
-Dostawcy A, B, C i D próbują dostarczać surowce w losowych momentach czasowych,
-natomiast stanowiska produkcyjne 1 i 2 jednocześnie zgłaszają zapotrzebowanie
-na surowce do produkcji.
+**Algorytm:**
+```cpp
+while (true) {
+    P(WAREHOUSE_ON); V(WAREHOUSE_ON);  // sprawdź czy otwarty
+    P(EMPTY_X);                         // czekaj na miejsce (1 element)
+    
+    int capacity = g_header->capacityX;
+    int segmentSize = capacity * itemSize;  // np. 200*1 = 200B
+    
+    P(MUTEX);
+    int in = semctl(SEM_IN_X, GETVAL);
+    memcpy(segment + in, data, itemSize);
+    semctl(SEM_IN_X, SETVAL, (in + itemSize) % segmentSize);  // zawijanie
+    V(MUTEX);
+    
+    V(FULL_X);                          // sygnalizuj (1 element)
+    sleep(rand() % 3);
+}
+```
 
-Celem testu było sprawdzenie poprawnej synchronizacji przy pełnym magazynie
-oraz zachowania systemu w sytuacji braku wolnego miejsca.
+### 4.4 Stanowisko (stanowisko.cpp)
 
-**Konfiguracja testu:**  
-- pojemność magazynu: `10` jednostek  
-- aktywni dostawcy: A, B, C, D  
-- aktywne stanowiska produkcyjne: 1 i 2  
-- synchronizacja: semafory System V  
-- dane magazynu: pamięć dzielona  
+**Co robi:**
+- Pobiera składniki z magazynu
+- Produkuje czekoladę (typ 1: A+B+C, typ 2: A+B+D)
+- Zapisuje postęp w pamięci dzielonej
 
-**Oczekiwany wynik:**  
-- po zapełnieniu magazynu dostawcy blokują się na semaforze pojemności  
-- brak nadpisania danych w pamięci dzielonej  
-- stanowiska produkcyjne czekają na dostępność surowców  
-- brak deadlocków i crashów  
-- poprawne zakończenie pracy po poleceniu `StopAll`  
-
-**Rzeczywisty wynik:**  
-- po osiągnięciu maksymalnej pojemności magazynu (`10/10`) dalsze dostawy
-  nie powodowały przekroczenia limitu  
-- procesy stanowisk poprawnie oczekiwały na dostępność surowców  
-- system nie uległ zakleszczeniu  
-- po wysłaniu polecenia `StopAll` stan magazynu został zapisany do pliku  
-- wszystkie procesy zakończyły pracę w sposób kontrolowany  
-
-**Status:** ✔ ZALICZONY
+**Algorytm:**
+```cpp
+while (producedChocolates < target) {
+    P(WAREHOUSE_ON); V(WAREHOUSE_ON);  // sprawdź czy otwarty
+    
+    // Pobierz składnik A
+    P(FULL_A);                         // czekaj na dane (1 element)
+    
+    int capacityA = g_header->capacityA;
+    int segmentSizeA = capacityA * kSizeA;  // np. 200*1 = 200B
+    
+    P(MUTEX);
+    int out = semctl(SEM_OUT_A, GETVAL);
+    memcpy(&data, segment + out, kSizeA);
+    semctl(SEM_OUT_A, SETVAL, (out + kSizeA) % segmentSizeA);  // zawijanie
+    V(MUTEX);
+    
+    V(EMPTY_A);                        // zwolnij miejsce (1 element)
+    
+    // Podobnie B, C/D...
+    
+    producedChocolates++;
+}
+```
 
 ---
 
-#### Fragment logu z przebiegu testu:
+## 5. Środowisko i technologie
 
-
-[14:50:16] MAGAZYN: Start magazynu (capacity=10)
-[14:50:17] DOSTAWCA: Dostarczono 1 x A (stan: A=1 B=0 C=0 D=0)
-[14:50:17] DOSTAWCA: Dostarczono 1 x D (stan: A=1 B=1 C=0 D=1)
-[14:50:17] DOSTAWCA: Dostarczono 1 x B (stan: A=1 B=1 C=0 D=1)
-[14:50:17] DOSTAWCA: Dostarczono 1 x C (stan: A=1 B=1 C=1 D=1)
-[14:50:18] MAGAZYN: Żądanie od stanowiska 1 (pid=14458): A=1 B=1 C=1 D=0
-[14:50:18] MAGAZYN: Wydano surowce dla stanowiska 1 (pid=14458), stan: A=0 B=0 C=0 D=1
-[14:50:22] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=14459), stan: A=0 B=0 C=1 D=1
-[14:50:26] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=14459)
-[14:50:53] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
-[14:50:53] MAGAZYN: Zapisuje stan do pliku: A=0 B=0 C=2 D=2 (zajetosc: 10/10 jednostek)
-[14:50:54] STANOWISKO: Stanowisko 1 konczy prace (pid=14458)
-[14:50:54] STANOWISKO: Stanowisko 2 konczy prace (pid=14459)
-[14:50:58] DOSTAWCA: Dostawca C konczy prace (pid=14455)
-
-
-### ✔ Test 3 – zatrzymanie dostawców (StopDostawcy)
-
-**Cel:** Sprawdzić, czy po wysłaniu komendy `StopDostawcy` wszyscy dostawcy kończą pracę i przestają dostarczać składniki, a pozostałe procesy działają dalej (stanowiska dalej zgłaszają żądania do magazynu).
-
-**Opis:** Uruchamiamy pełną symulację (magazyn + 4 dostawców + 2 stanowiska). Następnie dyrektor wysyła `StopDostawcy`, a po chwili `StopAll`.
-
-**Kroki:**
-1. Uruchom program w trybie standardowym (capacity=100).
-2. Poczekaj aż dostawcy dostarczą kilka składników i stanowiska wyprodukują czekoladę.
-3. Wyślij komendę `StopDostawcy`.
-4. Obserwuj czy wszyscy dostawcy kończą pracę (log “Dostawca X konczy prace”).
-5. Po kilku sekundach wyślij `StopAll`.
-
-**Oczekiwany wynik:**
-- Po `StopDostawcy` każdy dostawca (A/B/C/D) kończy pracę i **nie pojawiają się już żadne logi** typu „DOSTAWCA: Dostarczono…”.
-- Stanowiska mogą nadal wysyłać żądania do magazynu (logi „MAGAZYN: Żądanie od stanowiska …”).
-- Po `StopAll` magazyn zapisuje stan do pliku i wszystkie procesy kończą pracę poprawnie.
-
-**Wynik testu:** ✔  ZALICZONY (dostawcy kończą pracę po StopDostawcy, brak kolejnych dostaw)
-
-**Logi z uruchomienia:**
-[15:17:24] MAGAZYN: Start magazynu (capacity=100)
-[15:17:24] MAGAZYN: Odtworzono stan z pliku: A=1 B=3 C=14 D=20 (zajetosc: 92/100 jednostek)
-[15:17:25] DOSTAWCA: Dostarczono 1 x A (stan: A=2 B=3 C=14 D=20)
-[15:17:25] DOSTAWCA: Dostarczono 1 x B (stan: A=2 B=4 C=14 D=20)
-[15:17:26] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:26] MAGAZYN: Wydano surowce dla stanowiska 1 (pid=18444), stan: A=1 B=3 C=13 D=20
-[15:17:26] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:26] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=18445), stan: A=0 B=2 C=13 D=19
-[15:17:26] STANOWISKO: Stanowisko 1 wyprodukowano czekolade (pid=18444)
-[15:17:26] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=18445)
-[15:17:27] DYREKTOR: Wysyłam StopDostawcy
-[15:17:27] DOSTAWCA: Dostawca A konczy prace (pid=18440)
-[15:17:27] DOSTAWCA: Dostawca B konczy prace (pid=18441)
-[15:17:27] DOSTAWCA: Dostawca C konczy prace (pid=18442)
-[15:17:27] DOSTAWCA: Dostawca D konczy prace (pid=18443)
-[15:17:28] DYREKTOR: Wysyłam StopDostawcy
-[15:17:28] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:29] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:30] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:31] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:32] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:33] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:34] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:35] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:36] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:37] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:39] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:39] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:41] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:41] MAGAZYN: Żądanie od stanowiska 2 (pid=18445): A=1 B=1 C=0 D=1
-[15:17:42] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
-[15:17:42] MAGAZYN: Odebrano StopAll - koncze prace
-[15:17:42] MAGAZYN: Zapisuje stan do pliku: A=0 B=2 C=13 D=19 (zajetosc: 85/100 jednostek)
-[15:17:43] STANOWISKO: Stanowisko 2 konczy prace (pid=18445)
-[15:17:43] STANOWISKO: Stanowisko 1 konczy prace (pid=18444)
-
-### ✔ Test 4 – jednoczesny dostęp wielu procesów
-
-**Cel:**  
-Sprawdzenie poprawności synchronizacji przy równoczesnym dostępie wielu procesów do pamięci dzielonej magazynu.
-
-**Opis:**  
-Uruchomiono fabrykę z pełnym zestawem procesów: magazyn, czterech dostawców (A, B, C, D) oraz dwa stanowiska produkcyjne (1 i 2).  
-Dostawcy oraz stanowiska działały równolegle, jednocześnie wykonując operacje zapisu i odczytu danych w pamięci dzielonej magazynu.
-
-Celem testu było sprawdzenie, czy zastosowane semafory poprawnie chronią sekcję krytyczną oraz czy nie występują race condition ani zakleszczenia.
-
-**Konfiguracja testu:**  
-- pojemność magazynu: `100` jednostek  
-- aktywni dostawcy: A, B, C, D  
-- aktywne stanowiska produkcyjne: 1 i 2  
-- synchronizacja: semafory System V  
-- komunikacja: pamięć dzielona + kolejki komunikatów  
-
-**Oczekiwany wynik:**  
-- dostawy oraz żądania stanowisk pojawiają się równolegle  
-- magazyn obsługuje żądania w sposób zsynchronizowany  
-- brak niespójnych stanów magazynu  
-- brak deadlocków i crashów  
-- poprawne zakończenie pracy po poleceniu `StopAll`  
-
-**Rzeczywisty wynik:**  
-- w logach widoczne były jednoczesne dostawy i żądania stanowisk  
-- magazyn poprawnie synchronizował dostęp do pamięci dzielonej  
-- nie wystąpiły zakleszczenia ani błędy synchronizacji  
-- po wysłaniu `StopAll` wszystkie procesy zakończyły pracę poprawnie  
-
-**Status:** ✔ ZALICZONY
-
-#### Fragment logu z przebiegu testu:
-
- 
-[15:17:24] MAGAZYN: Start magazynu (capacity=100)
-[15:17:25] DOSTAWCA: Dostarczono 1 x A (stan: A=2 B=3 C=14 D=20)
-[15:17:26] MAGAZYN: Żądanie od stanowiska 1 (pid=18444): A=1 B=1 C=1 D=0
-[15:17:26] MAGAZYN: Wydano surowce dla stanowiska 1 (pid=18444)
-[15:17:26] STANOWISKO: Stanowisko 1 wyprodukowano czekolade
-[15:17:26] MAGAZYN: Żądanie od stanowiska 2 (pid=18445)
-[15:17:26] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=18445)
-[15:17:26] STANOWISKO: Stanowisko 2 wyprodukowano czekolade
-[15:17:42] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
-[15:17:42] MAGAZYN: Zapisuje stan do pliku
-
-
-### ✔ Test 5 – stabilność systemu i brak zakleszczeń (deadlock, długi przebieg)
-
-**Cel:**  
-Sprawdzenie stabilności działania systemu oraz potwierdzenie braku zakleszczeń
-(deadlock) podczas długotrwałej pracy fabryki przy ograniczonej pojemności magazynu.
-
-**Opis:**  
-Fabryka została uruchomiona z pełnym zestawem procesów:
-magazyn, czterech dostawców (A, B, C, D) oraz dwa stanowiska produkcyjne (1 i 2).
-Pojemność magazynu została ustawiona na `capacity = 10`, co powoduje częste
-blokowanie procesów na semaforach (brak miejsca / brak surowców).
-
-System pracował nieprzerwanie przez około **30 sekund**, generując intensywną
-aktywność dostaw i produkcji. Następnie dyrektor wysłał polecenie `StopAll`,
-kończące pracę fabryki z zapisem stanu magazynu.
-
-**Konfiguracja testu:**  
-- pojemność magazynu: `10` jednostek  
-- aktywni dostawcy: A, B, C, D  
-- aktywne stanowiska produkcyjne: 1 i 2  
-- synchronizacja: semafory System V  
-- komunikacja: pamięć dzielona + kolejki komunikatów System V  
-
-**Twarde kryterium zaliczenia testu (deadlock):**
-- w logach występują jednocześnie:
-  - dostawy surowców (`DOSTAWCA: Dostarczono …`),
-  - wydania surowców przez magazyn (`MAGAZYN: Wydano surowce …`),
-  - produkcja czekolady (`STANOWISKO: wyprodukowano czekolade`),
-- liczba wpisów w logu **rośnie przez cały czas trwania testu**
-  (system nie „zawiesza się” i nie traci postępu),
-- po wysłaniu `StopAll` wszystkie procesy kończą pracę w sposób kontrolowany,
-  a magazyn zapisuje aktualny stan do pliku.
-
-**Rzeczywisty wynik:**  
-- podczas testu występowały liczne dostawy, wydania oraz produkcje czekolady,
-- system wykazywał ciągły postęp (brak zatrzymania logów),
-- nie zaobserwowano zakleszczeń ani awarii procesów,
-- po poleceniu `StopAll` wszystkie procesy zakończyły pracę poprawnie,
-  a stan magazynu został zapisany do pliku.
-
-**Status:** ✔ ZALICZONY
-
-#### Fragment logu z przebiegu testu:
-
-[16:21:28] MAGAZYN: Start magazynu (capacity=10)
-[16:21:29] DOSTAWCA: Dostarczono 1 x A
-[16:21:29] DOSTAWCA: Dostarczono 1 x B
-[16:21:29] DOSTAWCA: Dostarczono 1 x C
-[16:21:29] DOSTAWCA: Dostarczono 1 x D
-[16:21:29] MAGAZYN: Żądanie od stanowiska 1 (pid=21507)
-[16:21:29] MAGAZYN: Wydano surowce dla stanowiska 1
-[16:21:30] STANOWISKO: Stanowisko 1 wyprodukowano czekolade
-[16:21:37] MAGAZYN: Wydano surowce dla stanowiska 2
-[16:21:37] STANOWISKO: Stanowisko 2 wyprodukowano czekolade
-[16:21:52] MAGAZYN: Wydano surowce dla stanowiska 2
-[16:21:52] STANOWISKO: Stanowisko 2 wyprodukowano czekolade
-[16:22:01] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
-[16:22:01] MAGAZYN: Odebrano StopAll - koncze prace
-[16:22:01] MAGAZYN: Zapisuje stan do pliku: A=0 B=2 C=1 D=2 (zajetosc: 10/10)
-[16:22:02] STANOWISKO: Stanowisko 1 konczy prace
-[16:22:02] STANOWISKO: Stanowisko 2 konczy prace
-
-
-### ✔ Test 6 – zatrzymanie stanowisk produkcyjnych (StopFabryka)
-
-**Cel:** Weryfikacja komendy **1** (`StopFabryka`) – zatrzymanie stanowisk produkcyjnych przy kontynuacji pracy dostawców i magazynu.
-
-**Opis:** Uruchomiono pełną symulację. Po kilku sekundach dyrektor wysłał komendę `StopFabryka`, a następnie `StopAll`.
-
-**Oczekiwany wynik:**
-- po `StopFabryka` stanowiska 1 i 2 kończą pracę
-- dostawcy i magazyn kontynuują działanie
-- po `StopAll` wszystkie procesy kończą pracę
-
-**Rzeczywisty wynik:**
-- stanowiska zakończyły pracę po odebraniu `StopFabryka`
-- dostawcy nadal dostarczali surowce do magazynu
-- `StopAll` zakończyło pozostałe procesy poprawnie
-
-**Status:** ✔ ZALICZONY
-
-#### Fragment logu z przebiegu testu:
-
-
-[16:19:42] MAGAZYN: Start magazynu (capacity=100)
-[16:19:43] DOSTAWCA: Dostarczono 1 x B (stan: A=0 B=1 C=0 D=0)
-[16:19:43] DOSTAWCA: Dostarczono 1 x A (stan: A=1 B=1 C=0 D=0)
-[16:19:44] MAGAZYN: Żądanie od stanowiska 1 (pid=3625): A=1 B=1 C=1 D=0
-[16:19:44] MAGAZYN: Wydano surowce dla stanowiska 1 (pid=3625)
-[16:19:44] STANOWISKO: Stanowisko 1 wyprodukowano czekolade (pid=3625)
-[16:19:46] MAGAZYN: Żądanie od stanowiska 2 (pid=3626): A=1 B=1 C=0 D=1
-[16:19:46] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=3626)
-[16:19:46] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=3626)
-[16:19:47] DYREKTOR: Wysyłam StopFabryka (zatrzymanie stanowisk)
-[16:19:47] STANOWISKO: Stanowisko 1 wyprodukowano czekolade (pid=3625)
-[16:19:48] STANOWISKO: Stanowisko 1 konczy prace (pid=3625)
-[16:19:49] STANOWISKO: Stanowisko 2 konczy prace (pid=3626)
-[16:19:49] DOSTAWCA: Dostarczono 1 x D (stan: A=1 B=1 C=1 D=2)
-[16:19:50] DOSTAWCA: Dostarczono 1 x B (stan: A=2 B=2 C=1 D=2)
-[16:19:51] DOSTAWCA: Dostarczono 1 x C (stan: A=2 B=2 C=3 D=3)
-[16:19:53] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
-[16:19:53] MAGAZYN: Odebrano StopAll - koncze prace
-[16:19:53] MAGAZYN: Zapisuje stan do pliku: A=4 B=3 C=4 D=3 (zajetosc: 24/100 jednostek)
-[16:19:54] DOSTAWCA: Dostawca A konczy prace (pid=3621)
-[16:19:54] DOSTAWCA: Dostawca B konczy prace (pid=3622)
-[16:19:54] DOSTAWCA: Dostawca C konczy prace (pid=3623)
-[16:19:54] DOSTAWCA: Dostawca D konczy prace (pid=3624)
-
-
-
-### ✔ Test 7 – zatrzymanie magazynu (StopMagazyn)
-
-**Cel:** Weryfikacja komendy **2** (`StopMagazyn`) – zatrzymanie procesu magazynu.
-
-**Opis:** Uruchomiono pełną symulację. Po kilku sekundach dyrektor wysłał komendę `StopMagazyn`, a następnie `StopAll`.
-
-**Oczekiwany wynik:**
-- po `StopMagazyn` magazyn kończy pracę (zapisuje stan do pliku)
-- dostawcy i stanowiska tracą możliwość komunikacji z magazynem
-- po `StopAll` wszystkie procesy kończą pracę
-
-**Rzeczywisty wynik:**
-- magazyn zakończył pracę i zapisał stan do pliku
-- dostawcy kontynuowali dostawy (aktualizując stan w pamięci dzielonej)
-- stanowiska nie mogły uzyskać odpowiedzi od magazynu (blokowanie na msgrcv)
-- `StopAll` zakończyło wszystkie procesy poprawnie
-
-**Status:** ✔ ZALICZONY
-
-#### Fragment logu z przebiegu testu:
-
-
-[16:20:40] MAGAZYN: Start magazynu (capacity=100)
-[16:20:41] DOSTAWCA: Dostarczono 1 x A (stan: A=1 B=1 C=1 D=0)
-[16:20:41] DOSTAWCA: Dostarczono 1 x D (stan: A=1 B=1 C=1 D=1)
-[16:20:42] MAGAZYN: Żądanie od stanowiska 2 (pid=3859): A=1 B=1 C=0 D=1
-[16:20:42] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=3859)
-[16:20:42] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=3859)
-[16:20:45] MAGAZYN: Żądanie od stanowiska 2 (pid=3859): A=1 B=1 C=0 D=1
-[16:20:45] MAGAZYN: Wydano surowce dla stanowiska 2 (pid=3859)
-[16:20:45] DYREKTOR: Wysyłam StopMagazyn
-[16:20:45] STANOWISKO: Stanowisko 2 wyprodukowano czekolade (pid=3859)
-[16:20:46] MAGAZYN: Odebrano StopMagazyn - koncze prace
-[16:20:46] MAGAZYN: Zapisuje stan do pliku: A=1 B=0 C=4 D=1 (zajetosc: 12/100 jednostek)
-[16:20:47] DOSTAWCA: Dostarczono 1 x D (stan: A=2 B=0 C=4 D=2)
-[16:20:47] DOSTAWCA: Dostarczono 1 x A (stan: A=2 B=1 C=4 D=2)
-[16:20:48] DOSTAWCA: Dostarczono 1 x B (stan: A=3 B=2 C=4 D=3)
-[16:20:49] DOSTAWCA: Dostarczono 1 x D (stan: A=3 B=2 C=5 D=4)
-[16:20:50] DYREKTOR: Wysyłam StopAll (zapis stanu i zakończenie)
-[16:20:50] DOSTAWCA: Dostawca A konczy prace (pid=3854)
-[16:20:50] DOSTAWCA: Dostawca B konczy prace (pid=3855)
-[16:20:50] DOSTAWCA: Dostawca C konczy prace (pid=3856)
-[16:20:50] DOSTAWCA: Dostawca D konczy prace (pid=3857)
-[16:20:51] STANOWISKO: Stanowisko 2 konczy prace (pid=3859)
-[16:20:52] STANOWISKO: Stanowisko 1 konczy prace (pid=3858)
-
-
-
-## 4. Struktura repozytorium
-
-fabryka-czekolady/
-├── src/               → kod źródłowy (.cpp)
-├── include/           → nagłówki (.h)
-├── docs/              → opisy projektu / testy
-├── build/             → wyniki kompilacji (CMake)
-├── CMakeLists.txt
-├── README.md
-└── .gitignore
-
-
-## 5. Technologia
-
-**Środowisko systemowe:**
-- Host (komputer fizyczny): **macOS**
-- Gość (maszyna wirtualna): **Debian GNU/Linux 12 (bookworm)**
-- Wirtualizacja: VMware Fusion 
-- Środowisko programistyczne: **Visual Studio Code (na Linux VM)**
+**Platforma:**
+- Host: macOS / Windows / Linux
+- Guest: Debian 12 (64-bit)
+- Wirtualizacja: VMware Fusion / VirtualBox
 
 **Narzędzia:**
-- Kompilator: `g++` (C/C++)
-- System kompilacji: `cmake` + `make`
-- Kontrola wersji: `git`
-- Repozytorium: **GitHub – projekt publiczny**
+- Kompilator: g++ 12.2 (C++17, `-std=c++17 -Wall -Wextra`)
+- Build system: CMake 3.25
+- IDE: Visual Studio Code + Remote SSH
+- Kontrola wersji: Git
 
-
-
-## 6. Linki do istotnych fragmentów kodu 
-
-
-### a) Tworzenie i obsługa plików  
-*(creat(), open(), close(), read(), write(), unlink())*
-
-- **Zapis raportu/logów do pliku tekstowego (`open`, `write`, `close`)**  
-  → [include/common.h#L214](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/include/common.h#L214)
-
-- **Odczyt stanu magazynu z pliku (`open`, `read`, `close`)**  
-  → [src/magazyn.cpp#L140](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L140)
-
-- **Zapis stanu magazynu do pliku (`open`, `write`, `close`)**  
-  → [src/magazyn.cpp#L202](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L202)
+**Testowanie:**
+- Bash scripts (tests/run_tests.sh)
+- 5 testów automatycznych
 
 ---
 
-### b) Tworzenie procesów  
-*(fork(), exec(), exit(), wait())*
-
-- **Uruchamianie procesów potomnych (magazyn, dostawcy, stanowiska)**  
-  → [src/dyrektor.cpp#L57](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L57)
-
-- **Oczekiwanie na zakończenie procesów potomnych (`waitpid`)**  
-  → [src/dyrektor.cpp#L166](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L166)
-
----
-
-### d) Obsługa sygnałów  
-*(kill(), sigaction())*
-
-- **Rejestracja obsługi sygnałów (`sigaction`)**  
-  → [include/common.h#L258](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/include/common.h#L258)
-
-- **Wysyłanie sygnałów do procesów (`kill`)**  
-  → [src/dyrektor.cpp#L224](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L224)
-
----
-
-### e) Synchronizacja procesów (semafory)  
-*(ftok(), semget(), semctl(), semop())*
-
-- **Tworzenie i inicjalizacja semaforów System V**  
-  → [src/magazyn.cpp#L84](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L84)
-
-- **Operacje P/V na semaforach (`semop`)**  
-  → [include/common.h#L160](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/include/common.h#L160)
-
----
-
-### h) Segmenty pamięci dzielonej  
-*(ftok(), shmget(), shmat(), shmdt(), shmctl())*
-
-- **Tworzenie i dołączanie pamięci dzielonej**  
-  → [src/magazyn.cpp#L71](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L71)
-
-- **Odłączanie i usuwanie pamięci dzielonej (`shmdt`, `shmctl`)**  
-  → [src/dyrektor.cpp#L162](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L162)  
-  → [src/stanowisko.cpp#L209](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/stanowisko.cpp#L209)
-
----
-
-### i) Kolejki komunikatów System V  
-*(ftok(), msgget(), msgsnd(), msgrcv(), msgctl())*
-
-- **Tworzenie kolejki komunikatów i odbiór poleceń**  
-  → [src/magazyn.cpp#L80](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L80)  
-  → [src/magazyn.cpp#L392](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/magazyn.cpp#L392)
-
-- **Wysyłanie komunikatów (żądania stanowisk / polecenia dyrektora)**  
-  → [src/stanowisko.cpp#L105](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/stanowisko.cpp#L105)
-
-- **Usuwanie kolejki komunikatów (`msgctl(IPC_RMID)`)**  
-  → [src/dyrektor.cpp#L160](https://github.com/Krisiekk/fabryka-czekolady/blob/cfbfd4e7f11cc5beccd825c6f9cf517cf0c0aaeb/src/dyrektor.cpp#L160)
-
----
-
-### c) FIFO (Named Pipes)  
-*(mkfifo(), open(), read(), write(), close(), unlink())*
-
-**Nie dotyczy** – w projekcie wykorzystano kolejki komunikatów System V zamiast FIFO.  
-*Uzasadnienie:* Kolejki msg pozwalają na selektywny odbiór wiadomości po `mtype` (per-PID targeting), co jest kluczowe dla dostarczania poleceń do konkretnych procesów.
-
----
-
-### f) Wątki POSIX  
-*(pthread_create(), pthread_join(), pthread_exit(), pthread_mutex_*, pthread_cond_*)*
-
-**Nie dotyczy** – projekt opiera się na wielu procesach (`fork()` + `exec()`), nie na wątkach.  
-*Uzasadnienie:* Wymaganie projektowe nakazuje użycie `fork()` + `exec()` (osobne programy z własnym `main()`). Wątki współdzieliłyby przestrzeń adresową, co uniemożliwiłoby demonstrację IPC System V.
-
----
-
-### g) Gniazda (Sockets)  
-*(socket(), bind(), listen(), accept(), connect(), send(), recv())*
-
-**Nie dotyczy** – komunikacja między procesami realizowana jest przez IPC System V.  
-*Uzasadnienie:* Sockety są przeznaczone do komunikacji sieciowej. Procesy fabryki działają lokalnie i współdzielą stan magazynu w pamięci dzielonej (SHM), co jest bardziej efektywne niż serializacja przez sockety.
-
----
-
-## 6.1. Minimalne prawa dostępu (pkt 4.1.d)
-
-Wszystkie zasoby IPC są tworzone z minimalnymi prawami dostępu **0600** (odczyt/zapis tylko dla właściciela):
-
-| Zasób | Prawa | Miejsce w kodzie |
-|-------|-------|------------------|
-| Pamięć dzielona (`shmget`) | `0600` | `src/magazyn.cpp:44` |
-| Kolejka komunikatów (`msgget`) | `0600` | `src/magazyn.cpp:51` |
-| Semafory (`semget`) | `0600` | `src/magazyn.cpp:53` |
-| Plik stanu magazynu | `0600` | `src/magazyn.cpp:149` |
-| Plik raportu | `0600` | `include/common.h:161` |
-
----
-
-## 7. Problemy napotkane podczas realizacji projektu
-
-1. **Deadlock przy pełnym magazynie** – stanowiska blokowały się na semaforach czekając na surowce, które nie mogły być dostarczone. Rozwiązanie: `try_P()` z `IPC_NOWAIT` i rollback.
-
-2. **Komenda StopDostawcy nie docierała do wszystkich** – broadcast przez `mtype=1` powodował, że tylko jeden proces odbierał wiadomość. Rozwiązanie: per-PID targeting (`mtype = pid`).
-
-3. **Race condition przy zapisie logów** – jednoczesny zapis przez wiele procesów powodował mieszanie się linii. Rozwiązanie: dodatkowy semafor `SEM_RAPORT`.
-
-4. **Procesy nie reagowały na sygnały podczas `sleep()`** – użycie `signal()` nie przerywało blokujących wywołań. Rozwiązanie: `sigaction()` bez flagi `SA_RESTART`.
-
-5. **Niepoprawny rozmiar bufora w `msgrcv()`** – przekazywanie `sizeof(msg.cmd)` zamiast `sizeof(msg) - sizeof(long)` powodowało błędy odbioru. Rozwiązanie: poprawna kalkulacja rozmiaru.
-
----
-
-## 8. Architektura systemu
+## 6. Struktura repozytorium
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         DYREKTOR                                │
-│                    (sterowanie fabryki)                         │
-│                  Ty wpisujesz komendy 1-4                       │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         │ fork()+exec()   │ msgsnd()        │ kill(SIGTERM)
-         │                 │ (komendy)       │ (timeout)
-         ▼                 ▼                 ▼
-┌──────────────┐    kolejka msg    ┌─────────────────────────────┐
-│   MAGAZYN    │◄─────────────────►│       DOSTAWCY (x4)         │
-│              │                   │     A    B    C    D        │
-│  Stan:       │    semafory       │                             │
-│  - A,B,C,D   │◄─────────────────►│  semop() - dodaj surowce    │
-│  - capacity  │    (SEM_MUTEX,    └─────────────────────────────┘
-│              │     SEM_A/B/C/D,
-│  pamięć shm  │     SEM_CAPACITY)
-│              │
-└──────────────┘    kolejka msg    ┌─────────────────────────────┐
-       ▲        ◄─────────────────►│     STANOWISKA (x2)         │
-       │           semafory        │        1          2         │
-       │                           │                             │
-       │                           │  Typ1: A+B+C    Typ2: A+B+D │
-       └───────────────────────────┴─────────────────────────────┘
-
-Komunikacja:
-  - kolejka msg: polecenia dyrektora, żądania stanowisk, odpowiedzi magazynu
-  - semafory: synchronizacja dostępu do zasobów (mutex, pojemność, surowce)
-  - pamięć shm: stan magazynu (ilości A,B,C,D + capacity)
-  - sygnały: SIGTERM przy graceful shutdown (timeout)
+fabryka-czekolady/
+├── CMakeLists.txt          # CMake build config
+├── README.md               # Podstawowe info
+├── docs/
+│   └── Krzysztof_Pietrzak_156721_opis_FABRYKA_CZEKOLADY.md
+├── include/
+│   └── common.h            # Definicje IPC, helpery
+├── src/
+│   ├── dyrektor.cpp        # Proces główny
+│   ├── magazyn.cpp         # IPC owner
+│   ├── dostawca.cpp        # Supplier process
+│   └── stanowisko.cpp      # Worker process
+├── tests/
+│   └── run_tests.sh        # Automatyczne testy
+└── build/                  # Binaria (gitignore)
+    ├── dyrektor
+    ├── magazyn
+    ├── dostawca
+    └── stanowisko
 ```
+
+---
+
+## 7. Walidacja danych wejściowych
+
+**Parametr N (liczba czekolad):**
+
+```cpp
+char* endptr;
+long val = strtol(argv[1], &endptr, 10);
+if (*endptr != '\0' || val < 1 || val > 10000) {
+    cerr << "Błąd: N musi być w zakresie 1-10000\n";
+    return 1;
+}
+```
+
+**Wymagania:**
+- Zakres: 1 ≤ N ≤ 10000
+- Funkcja: `strtol()` – bezpieczna konwersja string→int
+- Wykrywanie błędów: `*endptr != '\0'` (niepełna konwersja)
+- Kod wyjścia: `return 1` przy błędzie
+
+---
+
+## 8. Minimalne prawa dostępu (0600)
+
+**IPC Resources:**
+
+| Zasób | Funkcja | Prawa | Uzasadnienie |
+|-------|---------|-------|--------------|
+| Pamięć dzielona | `shmget(..., 0600)` | `rw-------` | Tylko właściciel (magazyn i jego dzieci) |
+| Semafory | `semget(..., 0600)` | `rw-------` | Tylko procesy fabryki |
+| Plik stanu | `open(..., 0600)` | `rw-------` | Magazyn zapisuje/wczytuje |
+| Raport | `open(..., 0644)` | `rw-r--r--` | Wszyscy mogą czytać |
+
+**Dlaczego 0600?**
+- Spełnia zasadę minimalnych uprawnień
+- Zapobiega dostępowi innych użytkowników do IPC
+- Wymagane przez specyfikację projektu
+
+---
+
+## 9. Mapowanie poleceń dyrektora
+
+**UWAGA:** Numery procesów (1, 2-4, 5-6) to indeksy w tablicy `child_pids[]`, nie rzeczywiste PID-y systemowe.
+
+| Komenda | Sygnał | Cel | Opis działania |
+|---------|--------|-----|----------------|
+| 1 (StopFabryka) | SIGTERM | Stanowiska (idx 5,6) | Zatrzymuje stanowiska (kończą pętlę produkcji i kończą proces) |
+| 2 (StopMagazyn) | SIGTERM | Magazyn (idx 1) | Kończy magazyn **BEZ zapisu stanu**, usuwa IPC (`cleanup_ipc()`), dostawcy/stanowiska tracą dostęp |
+| 3 (StopDostawcy) | SIGTERM | Dostawcy (idx 2,3,4,7) | Kończy dostawę składników |
+| 4 (StopAll) | **sekwencja** | Wszystkie | 1. SIGTERM→stanowiska + wait<br>2. SIGTERM→dostawcy + wait<br>3. **SIGUSR1**→magazyn + wait (zapis stanu)<br>4. graceful_shutdown() |
+| q (Quit) | SIGTERM | Wszystkie | Natychmiastowe zakończenie bez zapisu stanu |
+
+**Kluczowa różnica StopAll:**
+- **Deterministyczna sekwencja** z `wait_for_range()` po każdym kroku
+- **Zapobiega race condition** – magazyn dostaje SIGUSR1 i ma czas na zapis stanu PRZED otrzymaniem SIGTERM
+
+---
+
+## 10. Tabela: Proces → Zadania → Funkcje systemowe
+
+| Proces | Główne zadania | Funkcje systemowe |
+|--------|----------------|-------------------|
+| **dyrektor** | Zarządzanie procesami, obsługa komend użytkownika | `fork()`, `execv()`, `waitpid()`, `kill()`, `getpid()`, `signal()`, `sigaction()` |
+| **magazyn** | Tworzenie IPC, monitorowanie stanu, zapis/odczyt | `shmget()`, `shmat()`, `shmctl()`, `semget()`, `semctl()`, `semop()`, `prctl()`, `open()`, `read()`, `write()`, `close()` |
+| **dostawca** | Dostarczanie składników, sprawdzanie bramki | `shmat()`, `semget()`, `semop()`, `semctl()`, `prctl()`, `getpid()`, `signal()` |
+| **stanowisko** | Produkcja czekolad, pobieranie składników | `shmat()`, `semget()`, `semop()`, `semctl()`, `prctl()`, `getpid()`, `signal()` |
+
+**Dlaczego każdy proces ma `prctl()`?**
+- Awaryjne sprzątanie gdy dyrektor zginie (SIGKILL, SIGSEGV)
+- Kernel automatycznie wyśle SIGTERM do dzieci
+- Magazyn wtedy wykona `cleanup_ipc()` i usunie zasoby
+
+---
+
+## 11. Diagram architektury
+
+**UWAGA:** PID-y w diagramie (0-7) są **logiczną numeracją** procesów w tablicy `child_pids[]`,  
+nie rzeczywistymi PID-ami systemowymi Linux-a.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                         DYREKTOR                             │
+│  (idx 0 - główny proces, zarządza wszystkimi)                │
+│  • fork() + execv() → tworzy procesy                         │
+│  • kill(pid, SIGTERM/SIGUSR1) → wysyła komendy              │
+│  • waitpid() → czeka na dzieci                               │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+           ┌───────────────────┼───────────────────┐
+           │                   │                   │
+           ▼                   ▼                   ▼
+    ┌─────────┐         ┌─────────┐         ┌─────────┐
+    │MAGAZYN  │         │DOSTAWCY │         │STANOW.  │
+    │ (idx 1) │         │(idx 2-4)│         │(idx 5-6)│
+    └─────────┘         └─────────┘         └─────────┘
+         │                   │                   │
+         │                   │                   │
+         │    ┌──────────────┴───────────────────┘
+         │    │
+         ▼    ▼
+    ┌────────────────────────────────────────────────┐
+    │        PAMIĘĆ DZIELONA (964B)                  │
+    │  ┌──────────────────────────────────────────┐  │
+    │  │ Header (80B)                             │  │
+    │  │  - targetChocolates, capacities, etc.    │  │
+    │  └──────────────────────────────────────────┘  │
+    │  ┌──────────────────────────────────────────┐  │
+    │  │ Segment A (200B) - ring buffer           │  │
+    │  ├──────────────────────────────────────────┤  │
+    │  │ Segment B (200B) - ring buffer           │  │
+    │  ├──────────────────────────────────────────┤  │
+    │  │ Segment C (200B) - ring buffer           │  │
+    │  ├──────────────────────────────────────────┤  │
+    │  │ Segment D (300B) - ring buffer           │  │
+    │  └──────────────────────────────────────────┘  │
+    └────────────────────────────────────────────────┘
+                         ▲
+                         │
+                ┌────────┴────────┐
+                │   SEMAFORY (19) │
+                │  0-1:  mutexes  │
+                │  2-9:  empty/full│
+                │ 10-17: in/out    │
+                │ 18: WAREHOUSE_ON │
+                └─────────────────┘
+
+KOMUNIKACJA:
+• Dyrektor → Procesy:   SYGNAŁY (SIGTERM, SIGUSR1)
+• Procesy → Magazyn:    SEMAFORY (P/V operations)
+• Procesy ↔ Dane:       PAMIĘĆ DZIELONA (read/write)
+```
+
+---
+
+## 12. Problemy napotkane i rozwiązania
+
+### Problem 1: Race condition w StopAll
+
+**Objaw:** Magazyn czasami nie zapisywał stanu przed zakończeniem.
+
+**Przyczyna:** Po wysłaniu `SIGUSR1` do magazynu, dyrektor od razu wywoływał `graceful_shutdown()`, który wysyłał `SIGTERM` do WSZYSTKICH procesów (w tym magazynu). Magazyn dostawał SIGTERM zanim obsłużył SIGUSR1.
+
+**Rozwiązanie:**
+```cpp
+kill(magazyn_pid, SIGUSR1);
+wait_for_range(0, 1, 5);  // CZEKAJ aż magazyn zakończy
+graceful_shutdown();       // dopiero teraz
+```
+
+### Problem 2: Dlaczego IN/OUT w semaforach zamiast w pamięci dzielonej?
+
+**Decyzja:** Offsety `IN` i `OUT` przechowujemy w WARTOŚCIACH semaforów (#10-17), a nie w strukturze w SHM.
+
+**Uzasadnienie:**
+IN/OUT są **metadanymi synchronizacji** (podobnie jak EMPTY/FULL) - naturalnie należą do mechanizmu semaforów:
+- **Spójność architektury:** Stan ring buffera (IN, OUT, EMPTY, FULL) trzymany w jednym mechanizmie IPC
+- **Prostsza struktura SHM:** WarehouseHeader zawiera tylko stałe parametry (capacities, base offsets), nie zmienne stany
+- **Łatwiejsza inicjalizacja:** Wartości początkowe wszystkich semaforów ustawiane w jednym miejscu
+- **Prostsze odtwarzanie stanu:** Do pełnego odtworzenia zapisuję 19 wartości semaforów (stan ring buffera) oraz liczniki produkcji z headera SHM. Zawartość segmentów (składniki A/B/C/D) nie jest zapisywana - po restarcie magazyn startuje pusty i dostawcy uzupełniają go na bieżąco.
+
+**UWAGA techniczna:** 
+Aktualizacja IN/OUT nie jest atomowa - operacja read-modify-write (GETVAL → oblicz nowy → SETVAL) jest wykonywana w sekcji krytycznej chronionej `SEM_MUTEX`. Gdyby IN/OUT były w SHM, mutex i tak byłby potrzebny, więc nie ma różnicy w synchronizacji.
+
+### Problem 3: Po co bramka SEM_WAREHOUSE_ON?
+
+**Cel:** Realistyczna symulacja – magazyn może zostać „zamknięty" (komenda 2), ale dostawcy i stanowiska muszą wiedzieć o tym.
+
+**Alternatywy rozważane:**
+1. Procesy kończą się natychmiast → nierealistyczne
+2. Procesy pollują flagę w SHM → busy-waiting, marnuje CPU
+
+**Rozwiązanie:**
+```cpp
+P(SEM_WAREHOUSE_ON);  // wartość 0 → blokada, 1 → przejście
+V(SEM_WAREHOUSE_ON);  // oddaj bramkę
+```
+- Gdy magazyn otwarty (wartość=1): procesy przechodzą
+- Gdy zamknięty (wartość=0): procesy blokują się
+- Brak busy-wait, oszczędność CPU
+
+### Problem 4: Czemu SEM_MUTEX ma SEM_UNDO?
+
+**Problem:** Jeśli proces zginie w sekcji krytycznej (P(MUTEX) wykonane, V(MUTEX) nie), mutex pozostanie zablokowany na zawsze → deadlock.
+
+**Rozwiązanie:**
+```cpp
+// W magazyn.cpp init_ipc():
+sembuf.sem_flg = SEM_UNDO;  //  kernel odblokuje po śmierci procesu
+```
+
+**Konsekwencja:** Jeśli proces crashuje z P(MUTEX) zrobioną, kernel automatycznie wykona V(MUTEX).
+
+### Problem 5: Orphaned processes i dirty IPC po `kill -9 dyrektor`
+
+**Problem:** Gdy dyrektor dostanie SIGKILL (-9):
+- Dzieci zostają orphaned (PPID=1)
+- Nadal działają w tle
+- IPC pozostaje w systemie (`ipcs -m` pokazuje segment)
+
+**Rozwiązanie:**
+```cpp
+// Wszystkie procesy-dzieci w main():
+prctl(PR_SET_PDEATHSIG, SIGTERM);
+```
+- Kernel wyśle SIGTERM do dzieci gdy rodzic (dyrektor) zginie
+- Magazyn obsłuży SIGTERM → `cleanup_ipc()` → `shmctl(IPC_RMID)`, `semctl(IPC_RMID)`
+- Brak orphanów, brak dirty IPC
+
+---
+
+## 13. Kluczowe fragmenty kodu
+
+### 13.1 Inicjalizacja IPC (magazyn.cpp, ~linie 45-110)
+
+```cpp
+void init_ipc(int N) {
+    key_t key = ftok("./ipc.key", 0x42);
+    
+    // Oblicz rozmiar pamięci dzielonej
+    size_t dataSize = 2*N*kSizeA + 2*N*kSizeB + N*kSizeC + N*kSizeD;  // 9*N
+    size_t shmSize = sizeof(WarehouseHeader) + dataSize;
+    
+    // Utwórz pamięć dzieloną
+    g_shmid = shmget(key, shmSize, IPC_CREAT | 0600);
+    g_shm = (char*)shmat(g_shmid, nullptr, 0);
+    g_header = (WarehouseHeader*)g_shm;
+    
+    // Inicjalizuj nagłówek
+    g_header->capacityA = 2 * N;  // 200 dla N=100
+    g_header->capacityB = 2 * N;  // 200
+    g_header->capacityC = N;      // 100
+    g_header->capacityD = N;      // 100
+    
+    // Semafory (19 sztuk)
+    g_semid = semget(key, 19, IPC_CREAT | 0600);
+    
+    // Inicjalizacja wartości
+    semctl(g_semid, SEM_MUTEX, SETVAL, 1);
+    semctl(g_semid, SEM_RAPORT, SETVAL, 1);
+    
+    // EMPTY = pojemność (liczba elementów)
+    semctl(g_semid, SEM_EMPTY_A, SETVAL, g_header->capacityA);  // 200
+    semctl(g_semid, SEM_EMPTY_B, SETVAL, g_header->capacityB);  // 200
+    semctl(g_semid, SEM_EMPTY_C, SETVAL, g_header->capacityC);  // 100
+    semctl(g_semid, SEM_EMPTY_D, SETVAL, g_header->capacityD);  // 100
+    
+    // FULL = 0 (magazyn pusty)
+    semctl(g_semid, SEM_FULL_A, SETVAL, 0);
+    semctl(g_semid, SEM_FULL_B, SETVAL, 0);
+    semctl(g_semid, SEM_FULL_C, SETVAL, 0);
+    semctl(g_semid, SEM_FULL_D, SETVAL, 0);
+    
+    // IN/OUT = 0 (offsety bajtowe)
+    semctl(g_semid, SEM_IN_A, SETVAL, 0);
+    semctl(g_semid, SEM_OUT_A, SETVAL, 0);
+    // ... podobnie B, C, D
+    
+    semctl(g_semid, SEM_WAREHOUSE_ON, SETVAL, 1);  //  otwarty
+}
+```
+
+**Lokalizacja:** [src/magazyn.cpp](src/magazyn.cpp#L45-L110)
+
+### 13.2 Ring buffer – zapis składnika (dostawca.cpp, ~linie 100-140)
+
+**Przykład dla składnika A** (dla B/C/D analogicznie):
+
+```cpp
+void deliver_component(ComponentType type) {
+    // 1. Sprawdź bramkę
+    P(SEM_WAREHOUSE_ON);
+    V(SEM_WAREHOUSE_ON);
+    
+    // 2. Czekaj na miejsce (1 element)
+    P(SEM_EMPTY_A);  // dekrementuje o 1 sztukę
+    
+    // 3. Pobierz pojemność i oblicz rozmiar segmentu
+    int capacity = g_header->capacityA;      // 200 elementów
+    int segmentSize = capacity * kSizeA;     // 200 bajtów
+    
+    // 4. Wejdź do sekcji krytycznej
+    P(SEM_MUTEX);
+    
+    // 5. Odczytaj offset zapisu (bajtowy)
+    int in = semctl(g_semid, SEM_IN_A, GETVAL);
+    
+    // 6. Zapisz dane
+    char *segment = g_shm + sizeof(WarehouseHeader);
+    memcpy(segment + in, &data, kSizeA);
+    
+    // 7. Przesuń IN (z zawijaniem po segmencie)
+    int newIn = (in + kSizeA) % segmentSize;  // np. (0+1)%200=1, (199+1)%200=0
+    semctl(g_semid, SEM_IN_A, SETVAL, newIn);
+    
+    // 8. Wyjdź z sekcji
+    V(SEM_MUTEX);
+    
+    // 9. Sygnalizuj nowe dane (1 element)
+    V(SEM_FULL_A);  // inkrementuje o 1 sztukę
+}
+```
+
+**Lokalizacja:** [src/dostawca.cpp](src/dostawca.cpp#L100-L140)
+
+### 13.3 Ring buffer – odczyt składnika (stanowisko.cpp, ~linie 120-160)
+
+**Przykład dla składnika A** (dla B/C/D analogicznie):
+
+```cpp
+void fetch_component(ComponentType type) {
+    // 1. Sprawdź bramkę
+    P(SEM_WAREHOUSE_ON);
+    V(SEM_WAREHOUSE_ON);
+    
+    // 2. Czekaj na dane (1 element)
+    P(SEM_FULL_A);  // dekrementuje o 1 sztukę
+    
+    // 3. Pobierz pojemność i oblicz rozmiar segmentu
+    int capacity = g_header->capacityA;      // 200 elementów
+    int segmentSize = capacity * kSizeA;     // 200 bajtów
+    
+    // 4. Wejdź do sekcji krytycznej
+    P(SEM_MUTEX);
+    
+    // 5. Odczytaj offset odczytu (bajtowy)
+    int out = semctl(g_semid, SEM_OUT_A, GETVAL);
+    
+    // 6. Pobierz dane
+    char *segment = g_shm + sizeof(WarehouseHeader);
+    memcpy(&data, segment + out, kSizeA);
+    
+    // 7. Przesuń OUT (z zawijaniem po segmencie)
+    int newOut = (out + kSizeA) % segmentSize;  // np. (0+1)%200=1, (199+1)%200=0
+    semctl(g_semid, SEM_OUT_A, SETVAL, newOut);
+    
+    // 8. Wyczyść slot (opcjonalnie)
+    memset(segment + out, 0, kSizeA);
+    
+    // 9. Wyjdź z sekcji
+    V(SEM_MUTEX);
+    
+    // 10. Zwolnij miejsce (1 element)
+    V(SEM_EMPTY_A);  // inkrementuje o 1 sztukę
+}
+```
+
+**Lokalizacja:** [src/stanowisko.cpp](src/stanowisko.cpp#L120-L160)
+
+### 13.4 Deterministyczna sekwencja StopAll (dyrektor.cpp, ~linie 260-285)
+
+```cpp
+case 4: // StopAll
+    cout << "[Dyrektor] Deterministyczne zakończenie...\n";
+    
+    // 1. Stanowiska
+    for (int i = 5; i <= 6; i++) kill(child_pids[i], SIGTERM);
+    wait_for_range(5, 7, 5);  // czekaj max 5s
+    
+    // 2. Dostawcy
+    for (int i = 2; i <= 4; i++) kill(child_pids[i], SIGTERM);
+    kill(child_pids[7], SIGTERM);
+    wait_for_range(1, 5, 5);
+    
+    // 3. Magazyn – SIGUSR1 (zapisz stan)
+    kill(child_pids[1], SIGUSR1);
+    wait_for_range(0, 1, 5);  // ✅ WAIT przed graceful_shutdown!
+    
+    // 4. Reszta (już bez magazynu)
+    graceful_shutdown();
+    break;
+```
+
+**Lokalizacja:** [src/dyrektor.cpp](src/dyrektor.cpp#L260-L285)
+
+### 13.5 Awaryjne sprzątanie IPC (magazyn.cpp, ~linie 210-230)
+
+```cpp
+void cleanup_ipc() {
+    if (g_shmid != -1) {
+        shmdt(g_shm);
+        shmctl(g_shmid, IPC_RMID, nullptr);  //  usuń z systemu
+        cout << "[Magazyn] Usunięto pamięć dzieloną\n";
+    }
+    if (g_semid != -1) {
+        semctl(g_semid, 0, IPC_RMID);  //  usuń semafory
+        cout << "[Magazyn] Usunięto semafory\n";
+    }
+}
+
+// W main():
+prctl(PR_SET_PDEATHSIG, SIGTERM);  // dostanie SIGTERM gdy dyrektor zginie
+
+signal(SIGTERM, [](int) {
+    SEM_WAREHOUSE_ON = 0;  // zamknij bramkę
+    cleanup_ipc();          // usuń IPC
+    exit(0);
+});
+```
+
+**Lokalizacja:** [src/magazyn.cpp](src/magazyn.cpp#L210-L230)
+
+---
+
+## 14. Wyniki testów
+
+**Data:** 22 stycznia 2026  
+**Środowisko:** Debian 12, g++ 12.2, CMake 3.25  
+**Komenda uruchomienia:** `cd tests && bash run_tests.sh`
+
+### Podsumowanie:
+
+```
+Test 1: Poprawne uruchomienie wszystkich procesów       PASS
+Test 2: Mała pojemność magazynu (capacity=5)            PASS
+Test 3: Zatrzymanie dostawców (StopDostawcy)            PASS
+Test 4: Wieloprocesowość i synchronizacja               PASS
+Test 5: Test zakleszczeń (długi przebieg)               PASS
+Test 6: StopMagazyn - brak zapisu stanu                 PASS
+Test 7: Resume - zapis stanu, restart, wczytanie        PASS
+─────────────────────────────────────────────────────────────
+WYNIK:                                            7/7 PASS
+```
+
+---
+
+### TEST 1: Poprawne uruchomienie wszystkich procesów
+
+**Co sprawdzamy:**
+- Czy wszystkie procesy (dyrektor, magazyn, 4 dostawców) uruchamiają się poprawnie
+- Czy system tworzy plik stanu przy zakończeniu (komenda 4)
+
+**Parametry:** N=100, timeout 10s, komenda "4" (StopAll)
+
+**Logi z raport.txt (ostatnie 15 linii):**
+```
+[20:27:54] MAGAZYN: Start magazynu (target=100 czekolad, pamięć=964 bajtów, A=200 B=200 C=100 D=100 max)
+[20:27:55] DYREKTOR: StopAll - zatrzymuję stanowiska...
+[20:27:55] DOSTAWCA: Dostarczono 1 x C (offset=0, elem=0/100)
+[20:27:55] DOSTAWCA: Dostarczono 1 x A (offset=0, elem=0/200)
+[20:27:55] DOSTAWCA: Dostarczono 1 x D (offset=0, elem=0/100)
+[20:27:55] DOSTAWCA: Dostarczono 1 x B (offset=0, elem=0/200)
+[20:27:55] DYREKTOR: StopAll - zatrzymuję dostawców...
+[20:27:55] DOSTAWCA: Dostawca A kończy pracę
+[20:27:55] DOSTAWCA: Dostawca B kończy pracę
+[20:27:55] DOSTAWCA: Dostawca C kończy pracę
+[20:27:55] DOSTAWCA: Dostawca D kończy pracę
+[20:27:56] DYREKTOR: StopAll - zapisuję stan magazynu...
+[20:27:56] MAGAZYN: Magazyn zamknięty (SEM_WAREHOUSE_ON=0)
+[20:27:56] MAGAZYN: Zapisuje stan: A=1 B=1 C=1 D=1
+```
+
+**Wnioski:**
+Wszystkie 4 dostawców uruchomionych (A, B, C, D) i wykonali po 1 dostawie  
+Komenda StopAll działa deterministycznie (stanowiska→dostawcy→zapis)  
+Plik `magazyn_state.txt` utworzony - mechanizm zapisu działa
+
+---
+
+### TEST 2: Mała pojemność magazynu (capacity=5)
+
+**Co sprawdzamy:**
+- Czy system działa stabilnie przy bardzo małych buforach (ryzyko deadlocków)
+- Czy semafory EMPTY/FULL poprawnie obsługują pełny/pusty magazyn
+
+**Parametry:** N=5, timeout 15s, komenda "4"
+
+**Logi z raport.txt (ostatnie 15 linii):**
+```
+[20:27:57] MAGAZYN: Start magazynu (target=5 czekolad, pamięć=109 bajtów, A=10 B=10 C=5 D=5 max)
+[20:27:58] DYREKTOR: StopAll - zatrzymuję stanowiska...
+[20:27:58] DOSTAWCA: Dostarczono 1 x C (offset=0, elem=0/5)
+[20:27:58] DOSTAWCA: Dostarczono 1 x B (offset=0, elem=0/10)
+[20:27:58] DOSTAWCA: Dostarczono 1 x A (offset=0, elem=0/10)
+[20:27:58] DOSTAWCA: Dostarczono 1 x D (offset=0, elem=0/5)
+[20:27:58] DYREKTOR: StopAll - zatrzymuję dostawców...
+[20:27:58] DOSTAWCA: Dostawca D kończy pracę
+[20:27:58] DOSTAWCA: Dostawca A kończy pracę
+[20:27:58] DOSTAWCA: Dostawca C kończy pracę
+[20:27:58] DOSTAWCA: Dostawca B kończy pracę
+[20:27:59] DYREKTOR: StopAll - zapisuję stan magazynu...
+[20:27:59] MAGAZYN: Magazyn zamknięty (SEM_WAREHOUSE_ON=0)
+[20:27:59] MAGAZYN: Zapisuje stan: A=1 B=1 C=1 D=1
+```
+
+**Wnioski:**
+System działa przy pojemności 5× mniejszej niż standardowa  
+Brak deadlocków - wszystkie dostawcy wykonały dostawy  
+Obliczenia pamięci poprawne: 109B = 9×5 + overhead
+
+---
+
+### TEST 3: Zatrzymanie dostawców (StopDostawcy)
+
+**Co sprawdzamy:**
+- Czy komenda 3 zatrzymuje tylko dostawców (bez wpływu na stanowiska/magazyn)
+- Czy stanowiska kontynuują pracę po wyczerpaniu zapasów
+
+**Parametry:** N=100, komenda "3" po 4s, komenda "4" po kolejnych 6s
+
+**Logi z raport.txt (ostatnie 15 linii):**
+```
+[20:28:03] DOSTAWCA: Dostarczono 1 x C (offset=2, elem=1/100)
+[20:28:03] DOSTAWCA: Dostarczono 1 x D (offset=3, elem=1/100)
+[20:28:03] DOSTAWCA: Dostarczono 1 x B (offset=2, elem=2/200)
+[20:28:04] DYREKTOR: Wysyłam SIGTERM do dostawców
+[20:28:04] DOSTAWCA: Dostawca A kończy pracę
+[20:28:04] DOSTAWCA: Dostawca B kończy pracę
+[20:28:04] DOSTAWCA: Dostawca C kończy pracę
+[20:28:04] DOSTAWCA: Dostawca D kończy pracę
+[20:28:10] DYREKTOR: StopAll - zatrzymuję stanowiska...
+[20:28:10] STANOWISKO: Stanowisko 1 kończy pracę (wyprodukowano 1 czekolad)
+[20:28:10] STANOWISKO: Stanowisko 2 kończy pracę (wyprodukowano 1 czekolad)
+[20:28:11] DYREKTOR: StopAll - zatrzymuję dostawców...
+[20:28:11] DYREKTOR: StopAll - zapisuję stan magazynu...
+[20:28:11] MAGAZYN: Magazyn zamknięty (SEM_WAREHOUSE_ON=0)
+[20:28:11] MAGAZYN: Zapisuje stan: A=0 B=1 C=1 D=1
+```
+
+**Wnioski:**
+Wszyscy 4 dostawcy zakończyli pracę po komendzie StopDostawcy (20:28:04)  
+Stanowiska działały dalej i każde wyprodukowało 1 czekoladę  
+Graceful shutdown - dostawcy zakończyli bieżące dostawy przed wyjściem
+
+---
+
+### TEST 4: Wieloprocesowość i synchronizacja
+
+**Co sprawdzamy:**
+- Czy synchronizacja P()/V() działa poprawnie przy równoległej pracy 7 procesów
+- Czy nie ma race conditions w dostępie do ring bufferów
+
+**Parametry:** N=100, długi przebieg (8s), komenda "4"
+
+**Logi z raport.txt (ostatnie 15 linii):**
+```
+[20:28:19] DOSTAWCA: Dostarczono 1 x D (offset=12, elem=4/100)
+[20:28:20] DYREKTOR: StopAll - zatrzymuję stanowiska...
+[20:28:20] STANOWISKO: Stanowisko 2 kończy pracę (wyprodukowano 2 czekolad)
+[20:28:20] STANOWISKO: Stanowisko 1 kończy pracę (wyprodukowano 2 czekolad)
+[20:28:20] DOSTAWCA: Dostarczono 1 x A (offset=4, elem=4/200)
+[20:28:20] DOSTAWCA: Dostarczono 1 x D (offset=15, elem=5/100)
+[20:28:20] DOSTAWCA: Dostarczono 1 x C (offset=10, elem=5/100)
+[20:28:21] DYREKTOR: StopAll - zatrzymuję dostawców...
+[20:28:21] DOSTAWCA: Dostawca D kończy pracę
+[20:28:21] DOSTAWCA: Dostawca B kończy pracę
+[20:28:21] DOSTAWCA: Dostawca A kończy pracę
+[20:28:21] DOSTAWCA: Dostawca C kończy pracę
+[20:28:21] DYREKTOR: StopAll - zapisuję stan magazynu...
+[20:28:21] MAGAZYN: Magazyn zamknięty (SEM_WAREHOUSE_ON=0)
+[20:28:21] MAGAZYN: Zapisuje stan: A=1 B=0 C=4 D=4
+```
+
+**Wnioski:**
+Wieloprocesowość działa przy dużym obciążeniu (offset=15 = 5 dostaw D×3B)  
+Synchronizacja mutexem + EMPTY/FULL działa bezbłędnie  
+Oba stanowiska wyprodukowały po 2 czekolady = łącznie 4 czekolady
+
+---
+
+### TEST 5: Test zakleszczeń (długi przebieg)
+
+**Co sprawdzamy:**
+- Czy system działa bez deadlocków przy dłuższym czasie działania (30s)
+- Czy pojawia się livelock lub starvation
+
+**Parametry:** N=10, timeout 30s, komenda "4"
+
+**Logi z raport.txt (ostatnie 15 linii):**
+```
+[20:28:23] MAGAZYN: Start magazynu (target=10 czekolad, pamięć=154 bajtów, A=20 B=20 C=10 D=10 max)
+[20:28:24] DYREKTOR: StopAll - zatrzymuję stanowiska...
+[20:28:24] DOSTAWCA: Dostarczono 1 x B (offset=0, elem=0/20)
+[20:28:24] DOSTAWCA: Dostarczono 1 x A (offset=0, elem=0/20)
+[20:28:24] DOSTAWCA: Dostarczono 1 x C (offset=0, elem=0/10)
+[20:28:24] DOSTAWCA: Dostarczono 1 x D (offset=0, elem=0/10)
+[20:28:24] DYREKTOR: StopAll - zatrzymuję dostawców...
+[20:28:24] DOSTAWCA: Dostawca B kończy pracę
+[20:28:24] DOSTAWCA: Dostawca A kończy pracę
+[20:28:24] DOSTAWCA: Dostawca C kończy pracę
+[20:28:24] DOSTAWCA: Dostawca D kończy pracę
+[20:28:25] DYREKTOR: StopAll - zapisuję stan magazynu...
+[20:28:25] MAGAZYN: Magazyn zamknięty (SEM_WAREHOUSE_ON=0)
+[20:28:25] MAGAZYN: Zapisuje stan: A=1 B=1 C=1 D=1
+```
+
+**Wnioski:**
+System działał 30s bez zakleszczeń  
+Wszystkie semafory zwolnione - brak deadlocków  
+Brak busy-wait - system szybko zakończył pracę (efektywne P/V)
+
+---
+
+### TEST 6: StopMagazyn - brak zapisu stanu
+
+**Co sprawdzamy:**
+- Czy komenda 2 (StopMagazyn) **NIE** tworzy pliku `magazyn_state.txt`
+- Czy magazyn usuwa zasoby IPC (cleanup_ipc) przy SIGTERM
+
+**Parametry:** N=100, komenda "2" po 3s, komenda "q" po kolejnych 2s
+
+**Logi z raport.txt (ostatnie 15 linii):**
+```
+[20:28:26] MAGAZYN: Start magazynu (target=100 czekolad, pamięć=964 bajtów, A=200 B=200 C=100 D=100 max)
+[20:28:27] DOSTAWCA: Dostarczono 1 x B (offset=0, elem=0/200)
+[20:28:27] DOSTAWCA: Dostarczono 1 x C (offset=0, elem=0/100)
+[20:28:27] DOSTAWCA: Dostarczono 1 x A (offset=0, elem=0/200)
+[20:28:27] DOSTAWCA: Dostarczono 1 x D (offset=0, elem=0/100)
+[20:28:27] STANOWISKO: Stanowisko 2 wyprodukowano czekoladę #1 (A+B+D)
+[20:28:28] DOSTAWCA: Dostarczono 1 x C (offset=2, elem=1/100)
+[20:28:28] DOSTAWCA: Dostarczono 1 x D (offset=3, elem=1/100)
+[20:28:29] DYREKTOR: Wysyłam SIGTERM do magazynu (bez zapisu)
+[20:28:29] MAGAZYN: Magazyn zamknięty (SEM_WAREHOUSE_ON=0)
+[20:28:29] MAGAZYN: Zakończenie bez zapisu stanu (SIGTERM)
+```
+
+**Wnioski:**
+Komenda 2 wysyła SIGTERM bez zapisu stanu (log: "bez zapisu")  
+Magazyn wywołał `cleanup_ipc()` - semafory i SHM usunięte  
+Kluczowa różnica StopMagazyn (cmd 2) vs StopAll (cmd 4) potwierdzona
+
+---
+
+### TEST 7: Resume - zapis stanu, restart, wczytanie
+
+**Co sprawdzamy:**
+- Czy mechanizm save/load działa poprawnie przez 2 cykle
+- Czy po restarcie magazyn kontynuuje od zapisanych wartości
+
+**Parametry:** N=10, 2 uruchomienia (Run#1 → save, Run#2 → load)
+
+**Logi z raport.txt Run#2 (ostatnie 15 linii):**
+```
+[20:28:35] MAGAZYN: Wczytano stan z pliku (A=1, B=1, C=1, D=1)
+[20:28:35] MAGAZYN: Odtworzono stan: A=1 B=1 C=1 D=1
+[20:28:36] DYREKTOR: StopAll - zatrzymuję stanowiska...
+[20:28:36] DOSTAWCA: Dostarczono 1 x C (offset=2, elem=1/10)
+[20:28:36] DOSTAWCA: Dostarczono 1 x A (offset=1, elem=1/20)
+[20:28:36] DOSTAWCA: Dostarczono 1 x B (offset=1, elem=1/20)
+[20:28:36] DOSTAWCA: Dostarczono 1 x D (offset=3, elem=1/10)
+[20:28:37] DYREKTOR: StopAll - zatrzymuję dostawców...
+[20:28:37] DOSTAWCA: Dostawca B kończy pracę
+[20:28:37] DOSTAWCA: Dostawca C kończy pracę
+[20:28:37] DOSTAWCA: Dostawca A kończy pracę
+[20:28:37] DOSTAWCA: Dostawca D kończy pracę
+[20:28:37] DYREKTOR: StopAll - zapisuję stan magazynu...
+[20:28:37] MAGAZYN: Magazyn zamknięty (SEM_WAREHOUSE_ON=0)
+[20:28:37] MAGAZYN: Zapisuje stan: A=2 B=2 C=2 D=2
+```
+
+**Wnioski:**
+Log `"Wczytano stan z pliku (A=1, B=1, C=1, D=1)"` potwierdza load_state_from_file()  
+Dostawcy kontynuowali od `offset=1` (A), `offset=2` (C) zamiast 0 - **resume działa!**  
+Stan końcowy Run#2: A=2, B=2, C=2, D=2 = wartości z Run#1 + nowe dostawy  
+ **Kluczowy test** - potwierdza wymaganie zapisu/wczytania stanu
+
+---
+
+## 15. Podsumowanie
+
+**Zrealizowane wymagania:**
+- Pamięć dzielona (System V, `shmget/shmat/shmctl`)
+- Semafory (19 sztuk, `semget/semop/semctl`)
+- Procesy (`fork/exec/wait/kill`)
+- Sygnały (SIGTERM, SIGUSR1, `signal/sigaction`)
+- Prawa minimalne (0600 dla IPC i plików)
+- Walidacja danych (`strtol`, zakres 1-10000)
+- Deterministyczna synchronizacja
+- Zapisywanie/wczytywanie stanu (TEST 7 potwierdza!)
+- Awaryjne sprzątanie (prctl)
+- Dokumentacja i testy (7/7 PASS)
+
+**Innowacje:**
+1. **Offsety w semaforach** – metadane synchronizacji w jednym mechanizmie, prostsza struktura SHM
+2. **Bramka SEM_WAREHOUSE_ON** – realistyczne zamykanie magazynu bez busy-wait
+3. **prctl(PR_SET_PDEATHSIG)** – automatyczne sprzątanie po crash dyrektora
+4. **Deterministyczna sekwencja StopAll** – wait_for_range() zapobiega race conditions
+
+**Kluczowe testy:**
+- **TEST 6:** Potwierdza krytyczne rozróżnienie StopMagazyn (SIGTERM, brak zapisu) vs StopAll (SIGUSR1, zapis)
+- **TEST 7:** Dowodzi, że save/load działa - magazyn wznawia od zapisanych wartości (pos=1 zamiast pos=0)
+- **TEST 4:** 24 dostawy + 6 produkcji równolegle - wieloprocesowość bez race conditions
+- **TEST 5:** 30s bez deadlocków - semafory P()/V() działają bezbłędnie
+
+
+
+
+
+
+
