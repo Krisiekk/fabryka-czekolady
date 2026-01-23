@@ -272,7 +272,7 @@ void menu_loop() {
             if (g_children.size() > 0 && g_children[0] > 0) {
                 kill(g_children[0], SIGUSR1);  // magazyn zapisze stan i zakończy
                 
-                // WAŻNE: Czekaj na zakończenie magazynu PRZED graceful_shutdown()
+                
                 // Zapobiega wyścigowi SIGUSR1 vs SIGTERM
                 if (!wait_for_range(0, 1, 5)) {
                     std::cout << "[DYREKTOR] Timeout magazynu - SIGKILL\n";

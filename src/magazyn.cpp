@@ -246,21 +246,18 @@ void print_state() {
               << "/" << g_header->capacityD << "\n";
 }
 
-// Główna pętla magazynu - wypisuje stan co 2 sekundy
+// Czeka na zakończenie - blokuje do sygnału lub zamknięcia magazynu
 // Kończy gdy SEM_WAREHOUSE_ON=0 lub otrzyma sygnał
-void loop() {
+void wait_for_shutdown() {
     while (!g_stop) {
-        // Sprawdź semafor-bramkę (tak jak inne procesy)
+        // Sprawdź czy magazyn zamknięty
         int warehouseOn = semctl(g_semid, SEM_WAREHOUSE_ON, GETVAL);
         if (warehouseOn == 0) {
             std::cout << "[MAGAZYN] SEM_WAREHOUSE_ON=0, kończę pracę\n";
             break;
         }
-        
-        print_state();
-        
-        // Czekamy 2 sekundy lub do sygnału
-        sleep(2);
+        // Czekaj na sygnał (SIGTERM/SIGUSR1)
+        pause();
     }
 }
 
@@ -329,8 +326,8 @@ int main(int argc, char **argv) {
         log_raport(g_semid, "MAGAZYN", loadbuf);
     }
 
-    // Główna pętla
-    loop();
+    // Czekaj na zakończenie (blokująco)
+    wait_for_shutdown();
 
     // Log zamknięcia
     log_raport(g_semid, "MAGAZYN", "Magazyn zamknięty");
@@ -353,7 +350,7 @@ int main(int argc, char **argv) {
         log_raport(g_semid, "MAGAZYN", "Zakończenie bez zapisu stanu");
     }
     
-    // Odłącz pamięć (ale NIE usuwaj IPC - to robi dyrektor)
+    // Odłącz pamięć 
     if (g_header) {
         shmdt(g_header);
         g_header = nullptr;
