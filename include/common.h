@@ -105,7 +105,7 @@ struct WarehouseHeader {
 	size_t offsetA;  // = 0
 	size_t offsetB;  // = capacityA * kSizeA
 	size_t offsetC;  // = offsetB + capacityB * kSizeB
-	size_t offsetD;  // = offsetC + capacityC * kSizeC
+	size_t offsetD;  // = offsetC + capacityC ja m* kSizeC
 	
 	// Łączny rozmiar danych (bez nagłówka)
 	size_t dataSize;
@@ -266,6 +266,18 @@ inline int sem_P_undo(int semid, int semnum) {
 inline int sem_V_undo(int semid, int semnum) {
 	sembuf op{static_cast<unsigned short>(semnum), 1, SEM_UNDO};
 	return semop(semid, &op, 1);
+}
+
+/*
+ * Atomowe przejście przez bramkę (P i V w jednym wywołaniu kernela).
+ * Bezpieczne przy SIGSTOP - nie zostawia semafora "zabranego".
+ * Przerywalne przez sygnał (zwraca -1 z errno=EINTR).
+ */
+inline int pass_gate_intr(int semid, int semnum) {
+	sembuf ops[2];
+	ops[0] = {static_cast<unsigned short>(semnum), -1, 0};
+	ops[1] = {static_cast<unsigned short>(semnum), +1, 0};
+	return semop(semid, ops, 2);
 }
 
 // Wygodne wrappery dla mutexów

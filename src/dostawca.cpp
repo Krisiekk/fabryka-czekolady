@@ -122,12 +122,10 @@ bool deliver_one() {
         std::cout << "[DOSTAWCA " << g_type << "] Magazyn zamknięty - czekam na wznowienie pracy...\n";
     }
     
-    // Czekaj aż magazyn będzie otwarty (blokująco na semaforze)
-    if (sem_P_intr(g_semid, SEM_WAREHOUSE_ON, 1) == -1) {
+    // Czekaj aż magazyn będzie otwarty (atomowa bramka - bezpieczne przy SIGSTOP)
+    if (pass_gate_intr(g_semid, SEM_WAREHOUSE_ON) == -1) {
         return false;  // EINTR = sygnał
     }
-    // Od razu oddaj - to tylko bramka
-    sem_V_retry(g_semid, SEM_WAREHOUSE_ON, 1);
 
     int itemSize = size_of(g_type);
     int semEmpty = sem_empty_for(g_type);
@@ -184,15 +182,19 @@ bool deliver_one() {
         return false;
     }
     
-    // Zaloguj dostawę
+    // Zaloguj dostawę z aktualnym stanem semaforów
     int elemNum = inOffset / itemSize;
+    int fullVal = semctl(g_semid, semFull, GETVAL);
+    int emptyVal = semctl(g_semid, semEmpty, GETVAL);
+    
     char buf[128];
-    std::snprintf(buf, sizeof(buf), "Dostarczono 1 x %c (offset=%d, elem=%d/%d)",
-                  g_type, inOffset, elemNum, capacity);
+    std::snprintf(buf, sizeof(buf), "Dostarczono 1 x %c (IN=%d/%d, FULL=%d, EMPTY=%d)",
+                  g_type, elemNum, capacity, fullVal, emptyVal);
     log_raport(g_semid, "DOSTAWCA", buf);
     
-    std::cout << "[DOSTAWCA " << g_type << "] +1 (pos=" << elemNum 
-              << "/" << capacity << ")\n";
+    std::cout << "[DOSTAWCA " << g_type << "] +1 (IN=" << elemNum 
+              << "/" << capacity << " FULL=" << fullVal 
+              << " EMPTY=" << emptyVal << ")\n";
     
     return true;
 }

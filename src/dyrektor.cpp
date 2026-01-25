@@ -107,6 +107,26 @@ void remove_ipcs() {
     if (g_shmid != -1) shmctl(g_shmid, IPC_RMID, nullptr);
 }
 
+// Czyści stare zasoby IPC (jeśli pozostały po poprzednim uruchomieniu)
+void cleanup_old_ipcs() {
+    key_t key = ftok(kIpcKeyPath, kProjId);
+    if (key == -1) return;
+    
+    // Spróbuj usunąć stare semafory
+    int old_semid = semget(key, 0, 0600);
+    if (old_semid != -1) {
+        semctl(old_semid, 0, IPC_RMID);
+        std::cout << "[DYREKTOR] Usunięto stare semafory.\n";
+    }
+    
+    // Spróbuj usunąć starą pamięć dzieloną
+    int old_shmid = shmget(key, 0, 0600);
+    if (old_shmid != -1) {
+        shmctl(old_shmid, IPC_RMID, nullptr);
+        std::cout << "[DYREKTOR] Usunięto starą pamięć dzieloną.\n";
+    }
+}
+
 // Zatrzymuje wszystkie procesy gracefully
 void graceful_shutdown() {
     // Wysyłanie SIGTERM
@@ -180,7 +200,7 @@ void start_processes(int targetChocolates) {
 bool wait_for_range(size_t from, size_t to, int timeout_sec) {
     std::vector<bool> reaped(g_children.size(), false);
     
-    for (int i = 0; i < timeout_sec * 2; ++i) {  // 500ms intervals
+    for (int i = 0; i < timeout_sec * 2; ++i) {  
         bool all_done = true;
         
         for (size_t j = from; j < to && j < g_children.size(); ++j) {
@@ -315,6 +335,9 @@ int main(int argc, char **argv) {
     }
 
     ensure_ipc_key();
+    
+    // Usuń stare IPC z poprzedniego uruchomienia (jeśli istnieją)
+    cleanup_old_ipcs();
 
     std::cout << "[DYREKTOR] Start fabryki dla " << targetChocolates 
               << " czekolad na pracownika\n";

@@ -157,12 +157,10 @@ bool produce_one() {
         std::cout << "[STANOWISKO " << g_workerType << "] Magazyn zamknięty - czekam na wznowienie pracy...\n";
     }
     
-    // Czekaj aż magazyn będzie otwarty (blokująco na semaforze)
-    if (sem_P_intr(g_semid, SEM_WAREHOUSE_ON, 1) == -1) {
+    // Czekaj aż magazyn będzie otwarty (atomowa bramka - bezpieczne przy SIGSTOP)
+    if (pass_gate_intr(g_semid, SEM_WAREHOUSE_ON) == -1) {
         return false;  // EINTR = sygnał
     }
-    // Od razu oddaj - to tylko bramka
-    sem_V_retry(g_semid, SEM_WAREHOUSE_ON, 1);
 
     char typeC_or_D = (g_workerType == 1) ? 'C' : 'D';
     int semFullC_or_D = (g_workerType == 1) ? SEM_FULL_C : SEM_FULL_D;
