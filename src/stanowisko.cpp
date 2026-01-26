@@ -12,6 +12,7 @@
 #include <string>
 #include <unistd.h>
 #include <sys/prctl.h>  // prctl(PR_SET_PDEATHSIG)
+#include <thread>
 
 namespace {
 
@@ -22,6 +23,9 @@ WarehouseHeader *g_header = nullptr;  // nagłówek magazynu
 volatile sig_atomic_t g_stop = 0;     // flaga do koniec pracy
 int g_workerType = 1;                 // typ stanowiska (1 lub 2)
 int g_produced = 0;                   // ile czekolad wyprodukowano
+int g_msqid = -1;                     // kolejka komunikatów
+std::thread g_mq_thread;              // wątek listenera
+volatile sig_atomic_t g_msg_state = -1; // ostatni stan otrzymany z dyrektora (0/1)
 
 // Obsługuje sygnał - ustawia flagę aby wyjść z pętli
 void handle_signal(int) { g_stop = 1; }
@@ -237,6 +241,28 @@ int main(int argc, char **argv) {
     
     attach_ipc();
 
+    // Dołącz do kolejki komunikatów
+    g_msqid = msgget(make_key(), 0);
+    if (g_msqid == -1) {
+        perror("msgget");
+    } else {
+        g_mq_thread = std::thread([](){
+            while (!g_stop) {
+                int state = -1;
+                if (msq_recv_pid_intr(g_msqid, getpid(), &state) == -1) {
+                    if (errno == EINTR) {
+                        if (g_stop) break;
+                        continue;
+                    }
+                    perror("msgrcv");
+                    break;
+                }
+                g_msg_state = state;
+                std::cout << "[STANOWISKO " << g_workerType << "] Otrzymano powiadomienie: state=" << state << "\n";
+            }
+        });
+    }
+
     const char *recipe = (g_workerType == 1) ? "A+B+C" : "A+B+D";
     std::cout << "[STANOWISKO " << g_workerType << "] Start (pid=" << getpid() 
               << ", przepis=" << recipe << ")\n";
@@ -258,6 +284,11 @@ int main(int argc, char **argv) {
     log_raport(g_semid, "STANOWISKO", endbuf);
     std::cout << "[STANOWISKO " << g_workerType << "] Zakończono. "
               << "Wyprodukowano: " << g_produced << " czekolad.\n";
+
+    // Zatrzymaj listener kolejki (jeśli działa)
+    if (g_mq_thread.joinable()) {
+        g_mq_thread.join();
+    }
 
     // Odłącz się od pamięci dzielonej
     if (g_header && shmdt(g_header) == -1) perror("shmdt");

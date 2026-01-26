@@ -12,6 +12,7 @@
 #include <string>
 #include <unistd.h>
 #include <sys/prctl.h>  // prctl(PR_SET_PDEATHSIG)
+#include <thread>
 
 namespace {
 
@@ -21,6 +22,9 @@ int g_shmid = -1;                     // ID pamięci dzielonej
 WarehouseHeader *g_header = nullptr;  // nagłówek magazynu
 volatile sig_atomic_t g_stop = 0;     // flaga do końca
 char g_type = 'A';                    // typ składnika A/B/C/D
+int g_msqid = -1;                      // kolejka komunikatów
+std::thread g_mq_thread;               // wątek odbierający powiadomienia
+volatile sig_atomic_t g_msg_state = -1; // ostatni stan otrzymany z dyrektora (0/1)
 
 void handle_signal(int) { g_stop = 1; }
 
@@ -224,6 +228,30 @@ int main(int argc, char **argv) {
     attach_ipc();
     srand(static_cast<unsigned>(time(nullptr)) ^ getpid());
 
+    // Dołącz do kolejki komunikatów utworzonej przez dyrektora
+    g_msqid = msgget(make_key(), 0);
+    if (g_msqid == -1) {
+        // jeśli brak kolejki, kontynuujemy bez powiadomień
+        perror("msgget");
+    } else {
+        // Uruchom listener w tle
+        g_mq_thread = std::thread([](){
+            while (!g_stop) {
+                int state = -1;
+                if (msq_recv_pid_intr(g_msqid, getpid(), &state) == -1) {
+                    if (errno == EINTR) {
+                        if (g_stop) break;
+                        continue;
+                    }
+                    perror("msgrcv");
+                    break;
+                }
+                g_msg_state = state;
+                std::cout << "[DOSTAWCA " << g_type << "] Otrzymano powiadomienie: state=" << state << "\n";
+            }
+        });
+    }
+
     std::cout << "[DOSTAWCA " << g_type << "] Start (pid=" << getpid() 
               << ", rozmiar=" << size_of(g_type) << "B)\n";
 
@@ -244,6 +272,13 @@ int main(int argc, char **argv) {
     std::snprintf(endbuf, sizeof(endbuf), "Dostawca %c kończy pracę", g_type);
     log_raport(g_semid, "DOSTAWCA", endbuf);
     std::cout << "[DOSTAWCA " << g_type << "] Zakończono.\n";
+
+    // Zatrzymaj listener kolejki (jeśli działa)
+    if (g_mq_thread.joinable()) {
+        // Wywołanie msgrcv jest przerwane sygnałem SIGTERM przez dyrektora,
+        // więc wątek zakończy pętlę i się dołączy
+        g_mq_thread.join();
+    }
 
     // Odłącz się
     if (g_header && shmdt(g_header) == -1) perror("shmdt");

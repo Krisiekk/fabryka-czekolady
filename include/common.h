@@ -19,6 +19,7 @@
 #include <sys/stat.h>   // stałe dla uprawnień plików
 #include <fcntl.h>      // flagi open() - O_CREAT, O_RDONLY itp.
 #include <unistd.h>     // syscalle: read, write, close, getpid
+#include <sys/msg.h>    // kolejki komunikatów System V (msgrcv, msgsnd)
 
 // --- Nagłówki C++ ---
 #include <cerrno>       // errno - kody błędów
@@ -278,6 +279,36 @@ inline int pass_gate_intr(int semid, int semnum) {
 	ops[0] = {static_cast<unsigned short>(semnum), -1, 0};
 	ops[1] = {static_cast<unsigned short>(semnum), +1, 0};
 	return semop(semid, ops, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Kolejka komunikatów (po pid) - prosta implementacja helperów
+// ---------------------------------------------------------------------------
+struct msq_msg {
+	long mtype; // pid odbiorcy
+	int state;  // 0 = closed, 1 = open
+};
+
+// Wyślij wiadomość (retry na EINTR)
+inline int msq_send_pid(int msqid, pid_t pid, int state) {
+	msq_msg m{};
+	m.mtype = static_cast<long>(pid);
+	m.state = state;
+	while (true) {
+		if (msgsnd(msqid, &m, sizeof(m.state), 0) == 0) return 0;
+		if (errno == EINTR) continue;
+		return -1;
+	}
+}
+
+// Odbierz wiadomość dedykowaną dla pid (blokująco). Nie retry na EINTR - pozwól 
+// callerowi przerwać oczekiwanie na sygnał.
+inline int msq_recv_pid_intr(int msqid, pid_t pid, int *out_state) {
+	msq_msg m{};
+	ssize_t r = msgrcv(msqid, &m, sizeof(m.state), static_cast<long>(pid), 0);
+	if (r == -1) return -1;
+	*out_state = m.state;
+	return 0;
 }
 
 // Wygodne wrappery dla mutexów
