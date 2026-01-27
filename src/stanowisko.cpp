@@ -194,7 +194,20 @@ bool consume_one(char type) {
     if (sem_V_retry(g_semid, semEmpty, 1) == -1) {
         perror("sem_V EMPTY");
     }
-    
+
+    // Log pobrania (audyt) — zapisujemy OUT/index oraz aktualne wartości semaforów
+    {
+        int elemNum = outOffset / itemSize;
+        int fullVal = semctl(g_semid, semFull, GETVAL);
+        int emptyVal = semctl(g_semid, semEmpty, GETVAL);
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "Pobrano 1 x %c (OUT=%d/%d, FULL=%d, EMPTY=%d)",
+                      type, elemNum, capacity, fullVal, emptyVal);
+        log_raport(g_semid, "STANOWISKO", buf);
+        std::cout << "[STANOWISKO] -1 (" << type << ", OUT=" << elemNum << "/" << capacity
+                  << " FULL=" << fullVal << " EMPTY=" << emptyVal << ")\n";
+    }
+
     return true;
 }
 
@@ -294,7 +307,11 @@ int main(int argc, char **argv) {
     
     // Jeśli dyrektor zginie (np. SIGKILL), dostaniemy SIGTERM
     prctl(PR_SET_PDEATHSIG, SIGTERM);
-    
+    // Obsłuż sytuację wyścigu: jeśli rodzic już nie żyje, ustaw flagę zakończenia
+    if (getppid() == 1) {
+        g_stop = 1;
+    }
+
     attach_ipc();
 
     // Dołącz do kolejki komunikatów
