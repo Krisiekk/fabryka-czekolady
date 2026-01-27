@@ -176,9 +176,10 @@ KOMUNIKACJA:
 - **q – Quit**: kończy pętlę menu; dyrektor wysyła `SIGTERM` do wszystkich w `graceful_shutdown()`.
 
 ### 4.2. Obsługa SIGSTOP/SIGCONT magazynu
-Dyrektor uruchamia wątek monitorujący `waitpid(..., WUNTRACED|WCONTINUED)`. Po wykryciu:
 - **STOP**: `SEM_WAREHOUSE_ON=0`, powiadomienia do dzieci.
 - **CONT**: `SEM_WAREHOUSE_ON=1`, powiadomienia do dzieci.
+
+
 
 ### 4.3. Zapis/odtwarzanie stanu
 - Zapis następuje po `SIGUSR1` w magazynie.
@@ -205,18 +206,6 @@ SIGTERM -> stanowiska; czekaj; jeśli timeout -> SIGKILL
 SIGTERM -> dostawcy; czekaj; jeśli timeout -> SIGKILL
 SIGCONT -> magazyn; SIGUSR1 -> magazyn; czekaj; jeśli timeout -> SIGKILL
 ```
-
-### 4.6. Supervisor magazynu (opcjonalny)
-Prosty skrypt `bin/magazyn-supervisor.sh` uruchamia `magazyn`, monitoruje jego stan i w razie zatrzymania (np. `SIGSTOP` lub Ctrl+Z) wysyła `SIGCONT`. Skrypt automatycznie próbuje restartować proces po nieoczekiwanym zakończeniu (domyślnie do 10 razy).
-
-**Przykład użycia:**
-```bash
-./bin/magazyn-supervisor.sh ./build/magazyn 100
-```
-
-**Uwagi:**
-- Narzędzie jest opcjonalne i nie jest wymagane do poprawnego działania całego systemu; pomaga przy problemach z zatrzymywaniem procesu w interaktywnym terminalu.
-- Zmienne środowiskowe: `MAX_RESTARTS`, `RESTART_DELAY`.
 
 **`src/magazyn.cpp`**  
 - `init_ipc()` – tworzy SHM i semafory, inicjalizuje nagłówek i wartości semaforów.  
@@ -472,6 +461,22 @@ bool produce_one() {
 - **Race condition przy StopAll** → magazyn dostawał SIGTERM zanim obsłużył SIGUSR1; dodano sekwencję z `wait_for_range()` po SIGUSR1.
 - **Potencjalny deadlock mutexu przy awarii procesu** → jeśli proces padał w sekcji krytycznej, mutex zostawał zablokowany; ustawiono `SEM_UNDO` na mutexach.
 - **Orphaned process po zabiciu dyrektora** → dzieci zostawały w tle, IPC nie było sprzątane; dodano `prctl(PR_SET_PDEATHSIG, SIGTERM)` w procesach potomnych.
+
+#### 6.1. Testy — typowe przyczyny niepowodzeń i diagnostyka
+- **Brak pliku `magazyn_state.txt` lub `raport.txt` po teście** — najczęstsza przyczyna porażki testu 1/2/7. Sprawdź, czy test zakończył się poprawnie (timeouty) i czy `dyrektor` miał wystarczający czas na wysłanie `SIGUSR1` oraz na zapis stanu.
+  - Diagnostyka: uruchom ręcznie `./build/dyrektor N` i wykonaj sekwencję `4` (StopAll) z terminala; sprawdź `raport.txt` i `magazyn_state.txt` w katalogu `build/`.
+- **Brak logu potwierdzającego wczytanie stanu** — test 7 sprawdza obecność frazy `wczytano stan` w `raport.txt`. Upewnij się, że `magazyn` loguje wyraźną linię przy `load_state_from_file()` (np. `Wczytano stan z pliku ...`).
+- **Stare zasoby IPC (semafory/SHM) powodujące złe wartości** — jeśli poprzedni run zostawił IPC, semafory mogą mieć nieprawidłowe wartości. Test używa mechanizmu czyszczenia, ale ręcznie uruchom `ipcs -s/-m` i `ipcrm` jeśli coś zostało.
+- **Zatrzymany proces (SIGSTOP) w niewłaściwym miejscu** — może uniemożliwić zapis stanu lub poprawne zakończenie. Sprawdź `ps -o pid,pgid,stat,cmd` i użyj `kill -18 <pid>` aby wznowić oraz przejrzyj logi `raport.txt`.
+
+#### 6.2. Przydatne komendy diagnostyczne
+- Sprawdź log testów i pliki: `ls -l build/raport.txt build/magazyn_state.txt`  
+- Podejrzyj IPC: `ipcs -s` i `ipcs -m`  
+- Usuń konkretne semafory/pamięć: `ipcrm -s <semid>` lub `ipcrm -m <shmid>`  
+- Uruchom pojedynczy test ręcznie: `./build/dyrektor 10` → wpisz `4` (StopAll) i obserwuj `raport.txt`  
+- Uruchom skrypt testowy w trybie verbose: `bash -x tests/run_tests.sh` aby zobaczyć szczegóły wykonania i ewentualne błędy czasu wykonania.
+
+> **Uwaga:** testy mogą być wrażliwe na timeouty i kolejność sygnałów; przy fluktuacjach środowiska (obciążenie) zwiększenie timeoutów w `tests/run_tests.sh` pomaga stabilności.
 
 ---
 

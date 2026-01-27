@@ -1,6 +1,10 @@
-// Proces dostawcy - dostarcza składniki do magazynu
-// Czyta z semaforów i pisze dane do pamięci dzielonej
-// Kończy pracę po sygnale SIGTERM
+/**
+ * @file src/dostawca.cpp
+ * @brief Proces dostawcy — produkuje i dostarcza składniki do magazynu.
+ *
+ * Czeka na wolne miejsce (EMPTY), zapisuje dane do ring buffera i sygnalizuje
+ * obecność elementu przez V(FULL). Kończy pracę po SIGTERM.
+ */
 
 #include "../include/common.h"
 
@@ -26,9 +30,19 @@ int g_msqid = -1;                      // kolejka komunikatów
 std::thread g_mq_thread;               // wątek odbierający powiadomienia
 volatile sig_atomic_t g_msg_state = -1; // ostatni stan otrzymany z dyrektora (0/1)
 
+/**
+ * Handler sygnałów kończących pracę procesu (SIGTERM/SIGINT).
+ *
+ * Ustawia flagę `g_stop`, jest async-signal-safe (prosta operacja na volatilu).
+ */
 void handle_signal(int) { g_stop = 1; }
 
-// Zwraca rozmiar składnika w bajtach
+/**
+ * Zwraca rozmiar danego typu składnika w bajtach.
+ *
+ * @param t typ składnika ('A','B','C','D')
+ * @return rozmiar w bajtach
+ */
 static int size_of(char t) {
     switch (t) {
         case 'A': return kSizeA;
@@ -39,7 +53,12 @@ static int size_of(char t) {
     }
 }
 
-// Zwraca semafor EMPTY dla danego typu
+/**
+ * Zwraca indeks semafora EMPTY dla zadanego typu.
+ *
+ * @param t typ składnika
+ * @return indeks semafora EMPTY_X
+ */
 static int sem_empty_for(char t) {
     switch (t) {
         case 'A': return SEM_EMPTY_A;
@@ -50,7 +69,12 @@ static int sem_empty_for(char t) {
     }
 }
 
-// Zwraca semafor FULL dla danego typu
+/**
+ * Zwraca indeks semafora FULL dla zadanego typu.
+ *
+ * @param t typ składnika
+ * @return indeks semafora FULL_X
+ */
 static int sem_full_for(char t) {
     switch (t) {
         case 'A': return SEM_FULL_A;
@@ -61,7 +85,12 @@ static int sem_full_for(char t) {
     }
 }
 
-// Zwraca semafor IN dla danego typu
+/**
+ * Zwraca indeks semafora IN (offset zapisu) dla zadanego typu.
+ *
+ * @param t typ składnika
+ * @return indeks semafora IN_X
+ */
 static int sem_in_for(char t) {
     switch (t) {
         case 'A': return SEM_IN_A;
@@ -72,7 +101,13 @@ static int sem_in_for(char t) {
     }
 }
 
-// Zwraca segment i pojemność dla typu
+/**
+ * Zwraca wskaźnik na segment danych dla danego typu oraz ustawia out-param capacity.
+ *
+ * @param t typ składnika
+ * @param capacity (out) liczba elementów w segmencie
+ * @return wskaźnik na początek segmentu
+ */
 static char* get_segment(char t, int& capacity) {
     switch (t) {
         case 'A':
@@ -91,16 +126,28 @@ static char* get_segment(char t, int& capacity) {
             capacity = g_header->capacityA;
             return segment_A(g_header);
     }
-}
+} 
 
-// Tworzy klucz IPC
+/**
+ * Generuje klucz IPC używany przez proces dostawcy.
+ *
+ * Wrapper nad `ftok()` korzystający z `kIpcKeyPath` i `kProjId`.
+ * W razie błędu kończy program (`die_perror`).
+ *
+ * @return wygenerowany klucz IPC (key_t)
+ */
 key_t make_key() {
     key_t key = ftok(kIpcKeyPath, kProjId);
     if (key == -1) die_perror("ftok");
     return key;
 }
 
-// Łączy się do zasobów IPC (które stworzył magazyn)
+/**
+ * Dołącza dostawcę do zasobów IPC utworzonych przez magazyn.
+ *
+ * Otwiera istniejącą pamięć dzieloną, mapuje ją i podłącza do semaforów.
+ * W razie błędu kończy program (die_perror).
+ */
 void attach_ipc() {
     key_t key = make_key();
 
@@ -118,7 +165,14 @@ void attach_ipc() {
     if (g_semid == -1) die_perror("semget");
 }
 
-// Dostarcza jeden składnik - czeka na P(EMPTY), pisze dane, robi V(FULL)
+/**
+ * Wykonuje jedną dostawę składnika do magazynu.
+ *
+ * Kolejność: przejście przez bramkę, P(EMPTY), sekcja krytyczna z zapisem,
+ * aktualizacja IN i V(FULL). Funkcja może przerwać się na sygnale (errno==EINTR).
+ *
+ * @return true jeśli dostawa powiodła się, false w przypadku przerwania/błędu
+ */
 bool deliver_one() {
     // Sprawdź czy magazyn otwarty - jeśli nie, wypisz info i czekaj
     int warehouseOn = semctl(g_semid, SEM_WAREHOUSE_ON, GETVAL);
@@ -205,6 +259,16 @@ bool deliver_one() {
 
 }  // namespace
 
+/**
+ * Główna funkcja procesu dostawcy.
+ *
+ * Parsuje typ dostawcy (A/B/C/D), łączy się do IPC, odpala listener msq i
+ * w pętli wykonuje dostawy dopóki nie otrzyma SIGTERM.
+ *
+ * @param argc liczba argumentów (wymagany: typ A/B/C/D)
+ * @param argv tablica argumentów
+ * @return 0 przy poprawnym zakończeniu, 1 przy błędzie argumentu
+ */
 // Główna funkcja dostawcy
 int main(int argc, char **argv) {
     if (argc < 2) {

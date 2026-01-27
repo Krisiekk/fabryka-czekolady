@@ -1,6 +1,10 @@
-// Proces stanowiska produkcyjnego (1 lub 2)
-// Pobiera surowce z magazynu i produkuje czekoladę
-// Typ 1: A+B+C, Typ 2: A+B+D
+/**
+ * @file src/stanowisko.cpp
+ * @brief Proces stanowiska produkcyjnego (typ 1 lub 2).
+ *
+ * Pobiera składniki z magazynu i produkuje czekolady zgodnie z recepturą.
+ * Typ 1 używa A+B+C, typ 2 używa A+B+D.
+ */
 
 #include "../include/common.h"
 
@@ -28,9 +32,22 @@ std::thread g_mq_thread;              // wątek listenera
 volatile sig_atomic_t g_msg_state = -1; // ostatni stan otrzymany z dyrektora (0/1)
 
 // Obsługuje sygnał - ustawia flagę aby wyjść z pętli
+/**
+ * Handler sygnałów kończących pracę procesu stanowiska (np. SIGTERM).
+ * Ustawia flagę `g_stop` (async-signal-safe).
+ *
+ * @param sig numer sygnału (ignorowany)
+ */
 void handle_signal(int) { g_stop = 1; }
 
-// Pobiera klucz IPC
+/**
+ * Generuje klucz IPC używany przez proces stanowiska.
+ *
+ * Wrapper nad `ftok()` korzystający z `kIpcKeyPath` i `kProjId`.
+ * W razie błędu kończy program (`die_perror`).
+ *
+ * @return wygenerowany klucz IPC (key_t)
+ */
 key_t make_key() {
     key_t key = ftok(kIpcKeyPath, kProjId);
     if (key == -1) die_perror("ftok");
@@ -38,6 +55,11 @@ key_t make_key() {
 }
 
 // Łączy się do istniejących zasobów IPC (magazyn je wcześniej stworzył)
+/**
+ * Dołącza stanowisko do zasobów IPC utworzonych przez magazyn.
+ *
+ * Mapuje pamięć i pobiera id semaforów; kończy program przy błędzie.
+ */
 void attach_ipc() {
     key_t key = make_key();
 
@@ -53,7 +75,19 @@ void attach_ipc() {
     if (g_semid == -1) die_perror("semget");
 }
 
-// Zwraca informacje o segmencie (gdzie są dane, jaki rozmiar, które semafory)
+/**
+ * Pobiera informacje o segmencie dla zadanego typu składnika.
+ *
+ * Ustawia out-paramy: wskaźnik `segment`, rozmiar elementu `itemSize`, pojemność
+ * `capacity` oraz indeks semaforów `semEmpty` i `semOut`.
+ *
+ * @param type typ składnika ('A','B','C','D')
+ * @param segment (out) wskaźnik do początku segmentu
+ * @param itemSize (out) rozmiar pojedynczego elementu w bajtach
+ * @param capacity (out) pojemność segmentu (liczba elementów)
+ * @param semEmpty (out) indeks semafora EMPTY_X
+ * @param semOut (out) indeks semafora OUT_X
+ */
 void get_segment_info(char type, char*& segment, int& itemSize, int& capacity, 
                       int& semEmpty, int& semOut) {
     switch (type) {
@@ -95,6 +129,12 @@ void get_segment_info(char type, char*& segment, int& itemSize, int& capacity,
 }
 
 // Mapuje typ składnika na odpowiedni semafor FULL
+/**
+ * Zwraca indeks semafora FULL dla danego typu (stanowiska).
+ *
+ * @param type typ składnika
+ * @return indeks semafora FULL_X
+ */
 static int sem_full_for(char type) {
     switch (type) {
         case 'A': return SEM_FULL_A;
@@ -107,6 +147,12 @@ static int sem_full_for(char type) {
 
 // Pobiera jeden składnik z magazynu (ring buffer - wyciąga dane z segmentu)
 // Czeka na P(FULL), potem czyta dane i zwolnia miejsce z V(EMPTY)
+/**
+ * Pobiera pojedynczy składnik z magazynu (P(FULL) -> czytaj -> V(EMPTY)).
+ *
+ * @param type rodzaj składnika ('A','B','C','D')
+ * @return true gdy pobranie się powiodło, false przy przerwaniu/sygnałach
+ */
 bool consume_one(char type) {
     char *segment;
     int itemSize, capacity, semEmpty, semOut;
@@ -217,6 +263,16 @@ bool produce_one() {
 }  // namespace
 
 // Główna funkcja - uruchamia pracownika na stanowisku
+/**
+ * Główna funkcja procesu stanowiska.
+ *
+ * Parsuje numer stanowiska, dołącza do IPC i w pętli próbuje produkować
+ * czekolady dopóki nie dostanie SIGTERM.
+ *
+ * @param argc liczba argumentów (wymagany: numer stanowiska)
+ * @param argv tablica argumentów
+ * @return 0 przy poprawnym zakończeniu, 1 przy błędzie argumentu
+ */
 int main(int argc, char **argv) {
     if (argc < 2) {
         std::cerr << "Uzycie: stanowisko <1|2>\n";
@@ -287,6 +343,12 @@ int main(int argc, char **argv) {
 
     // Zatrzymaj listener kolejki (jeśli działa)
     if (g_mq_thread.joinable()) {
+        // Wyślij jedną wiadomość do siebie, żeby obudzić blokusjący msgrcv i
+        // umożliwić wątkowi zakończenie pętli (g_stop może być ustawione przez
+        // handler sygnału, ale msgrcv czasami nie budzi od razu).
+        if (g_msqid != -1) {
+            msq_send_pid(g_msqid, getpid(), 0);
+        }
         g_mq_thread.join();
     }
 

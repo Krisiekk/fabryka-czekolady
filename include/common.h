@@ -1,9 +1,10 @@
-/*
- * common.h - Wspólne definicje dla wszystkich procesów fabryki czekolady
- * 
- * Ten plik zawiera struktury danych, stałe i funkcje pomocnicze używane
- * przez wszystkie procesy: dyrektor, magazyn, dostawca, stanowisko.
- * 
+/**
+ * @file include/common.h
+ * @brief Wspólne definicje i helpery używane przez wszystkie procesy.
+ *
+ * Zawiera definicje struktur SHM, indeksy semaforów, funkcje pomocnicze do
+ * operacji na semaforach, kolejkach komunikatów oraz logowania.
+ *
  * Autor: Krzysztof Pietrzak (156721)
  * Projekt: Fabryka Czekolady - Systemy Operacyjne 2025/2026
  */
@@ -51,7 +52,13 @@ constexpr const char *kIpcKeyPath = "./ipc.key";
 // Identyfikator projektu dla ftok()
 constexpr int kProjId = 0x42;
 
-// Tworzy plik ipc.key jeśli nie istnieje - potrzebny dla ftok()
+/**
+ * Tworzy plik używany przez ftok() jeśli go jeszcze nie ma.
+ *
+ * Funkcja zapewnia, że plik `kIpcKeyPath` istnieje — to umożliwia
+ * generowanie stabilnego klucza IPC w kolejnych wywołaniach `ftok()`.
+ * W razie błędu wypisuje komunikat przez `perror()` i kontynuuje.
+ */
 inline void ensure_ipc_key() {
 	int fd = open(kIpcKeyPath, O_CREAT | O_WRONLY, 0600);
 	if (fd == -1) {
@@ -59,7 +66,7 @@ inline void ensure_ipc_key() {
 	} else {
 		close(fd);
 	}
-}
+} 
 
 // Domyślna liczba czekolad na pracownika gdy nie podano argumentu
 constexpr int kDefaultChocolates = 100;
@@ -114,6 +121,9 @@ struct WarehouseHeader {
 
 /**
  * Oblicza rozmiar pamięci dzielonej dla N czekolad na pracownika.
+ *
+ * @param n liczba czekolad na pracownika
+ * @return rozmiar w bajtach (nagłówek + obszar danych)
  */
 inline size_t calc_shm_size(int n) {
 	size_t headerSize = sizeof(WarehouseHeader);
@@ -126,6 +136,12 @@ inline size_t calc_shm_size(int n) {
 
 /**
  * Inicjalizuje nagłówek magazynu dla N czekolad na pracownika.
+ *
+ * Ustawia pojemności i offsety segmentów; nie ustawia stanów FULL/EMPTY,
+ * te wartości trzymane są w semaforach.
+ *
+ * @param h wskaźnik na nagłówek w pamięci dzielonej
+ * @param n liczba czekolad na pracownika
  */
 inline void init_warehouse_header(WarehouseHeader* h, int n) {
 	h->targetChocolates = n;
@@ -147,44 +163,56 @@ inline void init_warehouse_header(WarehouseHeader* h, int n) {
 }
 
 /**
- * Zwraca wskaźnik na początek danych (tuż za nagłówkiem).
+ * Zwraca wskaźnik na początek obszaru danych (tuż za nagłówkiem).
+ *
+ * @param h wskaźnik nagłówka magazynu
+ * @return wskaźnik do obszaru danych
  */
 inline char* warehouse_data(WarehouseHeader* h) {
 	return reinterpret_cast<char*>(h) + sizeof(WarehouseHeader);
 }
 
 /**
- * Zwraca wskaźnik na segment A/B/C/D.
+ * Zwraca wskaźnik na segment A.
+ *
+ * @param h wskaźnik nagłówka magazynu
+ * @return wskaźnik do początku segmentu A
  */
 inline char* segment_A(WarehouseHeader* h) { return warehouse_data(h) + h->offsetA; }
+/**
+ * Zwraca wskaźnik na segment B.
+ *
+ * @param h wskaźnik nagłówka magazynu
+ * @return wskaźnik do początku segmentu B
+ */
 inline char* segment_B(WarehouseHeader* h) { return warehouse_data(h) + h->offsetB; }
+/**
+ * Zwraca wskaźnik na segment C.
+ *
+ * @param h wskaźnik nagłówka magazynu
+ * @return wskaźnik do początku segmentu C
+ */
 inline char* segment_C(WarehouseHeader* h) { return warehouse_data(h) + h->offsetC; }
+/**
+ * Zwraca wskaźnik na segment D.
+ *
+ * @param h wskaźnik nagłówka magazynu
+ * @return wskaźnik do początku segmentu D
+ */
 inline char* segment_D(WarehouseHeader* h) { return warehouse_data(h) + h->offsetD; }
 
 // ============================================================================
 // SEMAFORY
 // ============================================================================
 
-/*
- * Indeksy semaforów w zestawie - model RING BUFFER z OFFSETAMI BAJTOWYMI.
- * 
- * Dla każdego składnika X (A, B, C, D) mamy 4 semafory:
- *   SEM_EMPTY_X - liczba WOLNYCH miejsc (init = capacity)
- *   SEM_FULL_X  - liczba ZAJĘTYCH miejsc / dostępnych sztuk (init = 0)
- *   SEM_IN_X    - OFFSET BAJTOWY zapisu (init = 0)
- *   SEM_OUT_X   - OFFSET BAJTOWY odczytu (init = 0)
- * 
- * Dostawca:
- *   P(EMPTY_X) -> offset = IN_X -> wpisz[offset] -> IN = (IN + itemSize) % segmentSize -> V(FULL_X)
- * 
- * Stanowisko:
- *   P(FULL_X) -> offset = OUT_X -> czytaj[offset] -> OUT = (OUT + itemSize) % segmentSize -> V(EMPTY_X)
- * 
- * IN/OUT to OFFSETY BAJTOWE (nie numery elementów)!
- * 
- * Mutexy:
- *   SEM_MUTEX - ochrona sekcji krytycznych w pamięci dzielonej
- *   SEM_RAPORT - ochrona zapisu do pliku raportu
+/**
+ * Indeksy semaforów w zestawie — model ring buffer z offsetami bajtowymi.
+ *
+ * Dla każdego składnika X (A,B,C,D) mamy semafory EMPTY/FULL oraz IN/OUT
+ * (offsety bajtowe). Opis działania: P(EMPTY) -> zapis -> IN update -> V(FULL)
+ * oraz P(FULL) -> odczyt -> OUT update -> V(EMPTY).
+ *
+ * Mutexy: SEM_MUTEX (ochrona SHM), SEM_RAPORT (ochrona pliku raportu).
  */
 enum SemaphoreIndex {
 	SEM_MUTEX = 0,      // mutex do ochrony pamięci dzielonej
@@ -218,21 +246,32 @@ enum SemaphoreIndex {
 // FUNKCJE POMOCNICZE
 // ============================================================================
 
+/**
+ * Wypisuje komunikat o błędzie i kończy program.
+ *
+ * Wrapper nad `perror()` kończący program z kodem `EXIT_FAILURE`.
+ * Używamy tego, gdy błąd jest krytyczny i nie można kontynuować.
+ *
+ * @param msg komunikat przekazywany do perror
+ */
 inline void die_perror(const char *msg) {
 	perror(msg);
 	std::exit(EXIT_FAILURE);
-}
+} 
 
 // --- Operacje na semaforach ---
 
-/*
- * sem_V_retry (signal) - zwiększa wartość semafora
- * 
- * RETRY na EINTR - operacja MUSI się udać!
- * Używaj do oddawania EMPTY/FULL po zakończeniu operacji.
- * Sygnał NIE może "zgubić" podbicia semafora.
- * 
- * Zwraca: 0 przy sukcesie, -1 przy błędzie innym niż EINTR
+/**
+ * Zwiększa semafor (V) i powtarza przy EINTR.
+ *
+ * Używaj tam, gdzie podbicie semafora musi się wykonać niezależnie od sygnałów
+ * (np. oddawanie EMPTY/FULL). Funkcja pętlą ponawia `semop` jeśli wystąpi
+ * EINTR.
+ *
+ * @param semid id zestawu semaforów
+ * @param semnum indeks semafora
+ * @param delta ile dodać (domyślnie 1)
+ * @return 0 przy sukcesie, -1 przy błędzie (errno ustawione)
  */
 inline int sem_V_retry(int semid, int semnum, int delta = 1) {
 	sembuf op{static_cast<unsigned short>(semnum), static_cast<short>(delta), 0};
@@ -243,39 +282,60 @@ inline int sem_V_retry(int semid, int semnum, int delta = 1) {
 	}
 }
 
-/*
- * sem_P_intr (wait) - zmniejsza wartość semafora (PRZERYWALNE!)
- * 
- * NIE robi retry na EINTR - pozwala procesowi wyjść po sygnale.
- * Używaj do czekania na FULL/EMPTY.
- * 
- * Zwraca: 0 przy sukcesie, -1 przy błędzie (w tym EINTR!)
- * Sprawdź errno==EINTR żeby rozróżnić sygnał od błędu.
+/**
+ * Czeka na semafor (P) — wywołanie przerwalne przez sygnały.
+ *
+ * Funkcja NIE powtarza `semop` przy EINTR — zwraca -1 i ustawia errno==EINTR
+ * gdy wywołanie przerwie sygnał. Używaj gdy chcesz, żeby oczekiwanie było
+ * możliwe do przerwania.
+ *
+ * @param semid id zestawu semaforów
+ * @param semnum indeks semafora
+ * @param delta ile zmniejszyć (domyślnie 1)
+ * @return 0 przy sukcesie, -1 przy błędzie (sprawdź errno dla EINTR)
  */
 inline int sem_P_intr(int semid, int semnum, int delta = 1) {
 	sembuf op{static_cast<unsigned short>(semnum), static_cast<short>(-delta), 0};
 	return semop(semid, &op, 1);
-}
+} 
 
-// P z SEM_UNDO (dla mutexów - automatyczne zwolnienie przy crashu)
+/**
+ * P z flagą SEM_UNDO — przydatne dla mutexów (auto-zwolnienie przy crashu).
+ *
+ * @param semid id zestawu semaforów
+ * @param semnum indeks semafora
+ * @return 0 przy sukcesie, -1 przy błędzie
+ */
 inline int sem_P_undo(int semid, int semnum) {
 	sembuf op{static_cast<unsigned short>(semnum), -1, SEM_UNDO};
 	return semop(semid, &op, 1);
 }
 
-// V z SEM_UNDO (dla mutexów)
+/**
+ * V z flagą SEM_UNDO.
+ *
+ * @param semid id zestawu semaforów
+ * @param semnum indeks semafora
+ * @return 0 przy sukcesie, -1 przy błędzie
+ */
 inline int sem_V_undo(int semid, int semnum) {
 	sembuf op{static_cast<unsigned short>(semnum), 1, SEM_UNDO};
 	return semop(semid, &op, 1);
-}
+} 
 
-/*
+/**
  * Atomowe przejście przez bramkę (P i V w jednym wywołaniu kernela).
- * Bezpieczne przy SIGSTOP - nie zostawia semafora "zabranego".
- * Przerywalne przez sygnał (zwraca -1 z errno=EINTR).
+ *
+ * Zapobiega sytuacji, w której proces zabiera bramkę i potem jest zatrzymany.
+ * Operacja jest przerwalna — w razie sygnału zwraca -1 i errno==EINTR.
+ *
+ * @param semid id zestawu semaforów
+ * @param semnum indeks bramki
+ * @return 0 przy sukcesie, -1 przy błędem (errno może być EINTR)
  */
 inline int pass_gate_intr(int semid, int semnum) {
 	sembuf ops[2];
+
 	ops[0] = {static_cast<unsigned short>(semnum), -1, 0};
 	ops[1] = {static_cast<unsigned short>(semnum), +1, 0};
 	return semop(semid, ops, 2);
@@ -289,11 +349,19 @@ struct msq_msg {
 	int state;  // 0 = closed, 1 = open
 };
 
-// Wyślij wiadomość (retry na EINTR)
+/**
+ * Wyślij wiadomość do konkretnego pida (kolejka System V), retry na EINTR.
+ *
+ * @param msqid id kolejki
+ * @param pid pid odbiorcy (mtype)
+ * @param state payload (0 = zamknięte, 1 = otwarte)
+ * @return 0 przy sukcesie, -1 przy błędzie
+ */
 inline int msq_send_pid(int msqid, pid_t pid, int state) {
 	msq_msg m{};
 	m.mtype = static_cast<long>(pid);
 	m.state = state;
+
 	while (true) {
 		if (msgsnd(msqid, &m, sizeof(m.state), 0) == 0) return 0;
 		if (errno == EINTR) continue;
@@ -301,18 +369,32 @@ inline int msq_send_pid(int msqid, pid_t pid, int state) {
 	}
 }
 
-// Odbierz wiadomość dedykowaną dla pid (blokująco). Nie retry na EINTR - pozwól 
-// callerowi przerwać oczekiwanie na sygnał.
+/**
+ * Odbierz wiadomość dedykowaną dla konkretnego pida (blokująco, przerwalne).
+ *
+ * Jeśli wywołanie zostanie przerwane sygnałem, funkcja zwróci -1 i errno==EINTR.
+ *
+ * @param msqid id kolejki
+ * @param pid pid odbiorcy (mtype)
+ * @param out_state wskaźnik, do którego zapisany zostanie otrzymany stan
+ * @return 0 przy sukcesie, -1 przy błędzie
+ */
 inline int msq_recv_pid_intr(int msqid, pid_t pid, int *out_state) {
 	msq_msg m{};
 	ssize_t r = msgrcv(msqid, &m, sizeof(m.state), static_cast<long>(pid), 0);
+
 	if (r == -1) return -1;
 	*out_state = m.state;
 	return 0;
 }
 
-// Wygodne wrappery dla mutexów
-// PĘTLA NA EINTR - mutex MUSI być zdobyty/zwolniony!
+/**
+ * Wrapper do zdobycia globalnego mutexu (SEM_MUTEX) - retry na EINTR.
+ *
+ * Funkcja pętlą próbuje wykonać P z SEM_UNDO; w razie błędu kończy program.
+ *
+ * @param semid id zestawu semaforów
+ */
 inline void P_mutex(int semid) {
 	while (sem_P_undo(semid, SEM_MUTEX) == -1) {
 		if (errno == EINTR) continue;  // sygnał - ponów
@@ -320,12 +402,17 @@ inline void P_mutex(int semid) {
 	}
 }
 
+/**
+ * Wrapper do zwolnienia globalnego mutexu (SEM_MUTEX) - retry na EINTR.
+ *
+ * @param semid id zestawu semaforów
+ */
 inline void V_mutex(int semid) {
 	while (sem_V_undo(semid, SEM_MUTEX) == -1) {
 		if (errno == EINTR) continue;  // sygnał - ponów
 		die_perror("V_mutex");
 	}
-}
+} 
 
 // ============================================================================
 // LOGOWANIE DO PLIKU RAPORTU
@@ -333,6 +420,17 @@ inline void V_mutex(int semid) {
 
 constexpr const char *kRaportPath = "raport.txt";
 
+/**
+ * Zapisuje linię do pliku raportu chronionego SEM_RAPORT.
+ *
+ * Funkcja zdobywa mutex SEM_RAPORT (retry na EINTR), dopisuje czas + komunikat
+ * i zwalnia mutex (także retry). W razie błędu przy lock wypisuje perror i
+ * wychodzi bez logowania.
+ *
+ * @param semid id zestawu semaforów (używany SEM_RAPORT)
+ * @param proces nazwa procesu (np. "DYREKTOR")
+ * @param msg wiadomość do dopisania
+ */
 inline void log_raport(int semid, const char* proces, const char* msg) {
 	// Wejście do sekcji krytycznej (retry na EINTR)
 	while (sem_P_undo(semid, SEM_RAPORT) == -1) {
@@ -371,10 +469,12 @@ inline void log_raport(int semid, const char* proces, const char* msg) {
 // ============================================================================
 
 /**
- * Konfiguruje obsługę sygnałów.
- * 
- * Bez SA_RESTART - blokujące semop() zwróci EINTR po sygnale,
- * co pozwala procesowi zakończyć się.
+ * Ustawia podstawowe handler-y sygnałów (SIGTERM, SIGINT, SIGUSR1).
+ *
+ * Nie ustawia SA_RESTART, dzięki czemu wywołania blokujące przerwą się i
+ * zwrócą EINTR — to ułatwia bezpieczne zakończenie procesów po sygnale.
+ *
+ * @param handler funkcja obsługi sygnału (void(int))
  */
 inline void setup_sigaction(void (*handler)(int)) {
 	struct sigaction sa{};

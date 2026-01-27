@@ -1,6 +1,11 @@
-// Proces magazynu - tworzy zasoby IPC i zarządza nimi
-// Inicjalizuje pamięć dzieloną, semafory i mutexy
-// Kończy pracę po sygnale SIGTERM lub SIGUSR1
+/**
+ * @file src/magazyn.cpp
+ * @brief Proces magazynu — właściciel zasobów IPC.
+ *
+ * Tworzy i inicjalizuje SHM oraz semafory, obsługuje zapis stanu i
+ * oczekuje na sygnały sterujące (SIGUSR1/SIGTERM). Odpowiada za cleanup
+ * zasobów przy zamknięciu.
+ */
 
 #include "../include/common.h"
 
@@ -22,18 +27,40 @@ volatile sig_atomic_t g_stop = 0;        // flaga zakoczenia
 volatile sig_atomic_t g_save_on_exit = 0; // flaga zapisu przy wyjściu
 std::string g_stateFile = "magazyn_state.txt";
 
-// Obsługi sygnałów
+/**
+ * Handler SIGTERM — ustawia flagę zakończenia (async-signal-safe).
+ *
+ * @param sig numer sygnału (ignorowany)
+ */
 void handle_sigterm(int) { g_stop = 1; }
-void handle_sigusr1(int) { g_stop = 1; g_save_on_exit = 1; }
 
-// Tworzy klucz IPC
+/**
+ * Handler SIGUSR1 — ustawia flagę zakończenia i zapisania stanu przy wyjściu.
+ *
+ * @param sig numer sygnału (ignorowany)
+ */
+void handle_sigusr1(int) { g_stop = 1; g_save_on_exit = 1; } 
+
+/**
+ * Generuje klucz IPC za pomocą `ftok` (używany w magazynie).
+ *
+ * @return klucz IPC; przy błędzie wywołuje `die_perror` i kończy program
+ */
 key_t make_key() {
     key_t key = ftok(kIpcKeyPath, kProjId);
     if (key == -1) die_perror("ftok");
     return key;
-}
+} 
 
 // Inicjalizuje zasoby IPC
+/**
+ * Tworzy i inicjalizuje zasoby IPC (SHM, semafory) dla magazynu.
+ *
+ * Ustala rozmiary segmentów na podstawie targetChocolates i inicjuje semafory
+ * wartościami początkowymi.
+ *
+ * @param targetChocolates liczba czekolad na pracownika
+ */
 void init_ipc(int targetChocolates) {
     key_t key = make_key();
     size_t shmSize = calc_shm_size(targetChocolates);
@@ -111,6 +138,12 @@ void init_ipc(int targetChocolates) {
 }
 
 // Wczytuje stan magazynu z pliku
+/**
+ * Wczytuje zapisany stan magazynu z pliku stanu (jeśli istnieje).
+ *
+ * Odtwarza `targetChocolates` i wartości FULL dla A/B/C/D, aby zapewnić
+ * spójność semaforów po restarcie.
+ */
 void load_state_from_file() {
     int fd = open(g_stateFile.c_str(), O_RDONLY);
     if (fd == -1) return;
@@ -194,10 +227,15 @@ void load_state_from_file() {
     log_raport(g_semid, "MAGAZYN", logbuf);
 }
 
-// Zapisuje stan magazynu do pliku
+/**
+ * Zapisuje bieżący stan magazynu do pliku `g_stateFile`.
+ *
+ * Zapisuje `targetChocolates` oraz liczniki FULL dla A/B/C/D w jednej linii.
+ * Nie zapisuje rzeczywistych danych segmentów.
+ */
 void save_state_to_file() {
     // Odczytaj stan z semaforów (atomowe operacje, nie potrzeba mutexu) bo tylko odczytuje dane 
-    int a = semctl(g_semid, SEM_FULL_A, GETVAL);
+    int a = semctl(g_semid, SEM_FULL_A, GETVAL); 
     int b = semctl(g_semid, SEM_FULL_B, GETVAL);
     int c = semctl(g_semid, SEM_FULL_C, GETVAL);
     int d = semctl(g_semid, SEM_FULL_D, GETVAL);
@@ -214,11 +252,15 @@ void save_state_to_file() {
     }
 }
 
-// Odłącza się od pamięci dzielonej i USUWA zasoby IPC
-// Magazyn jest odpowiedzialny za sprzątanie - nawet jeśli dyrektor zginął
+/**
+ * Odłącza pamięć dzieloną i usuwa zasoby IPC (jeśli działa jako właściciel).
+ *
+ * Wywoływane podczas zamykania magazynu — usuwa SHM i semafory, wypisuje
+ * błędy przez `perror` jeśli operacje usunięcia się nie powiodą.
+ */
 void cleanup_ipc() {
     // Odłącz pamięć
-    if (g_header && shmdt(g_header) == -1) perror("shmdt");
+    if (g_header && shmdt(g_header) == -1) perror("shmdt"); 
     
     // Usuń zasoby IPC (magazyn jest właścicielem)
     if (g_shmid != -1) {
@@ -229,9 +271,12 @@ void cleanup_ipc() {
     }
 }
 
-// Wypisuje aktualny stan magazynu
+/**
+ * Wypisuje na stdout aktualne wartości FULL dla A/B/C/D i ich pojemności.
+ * Przydatne do debugowania i testów integracyjnych.
+ */
 void print_state() {
-    int a = semctl(g_semid, SEM_FULL_A, GETVAL);
+    int a = semctl(g_semid, SEM_FULL_A, GETVAL); 
     int b = semctl(g_semid, SEM_FULL_B, GETVAL);
     int c = semctl(g_semid, SEM_FULL_C, GETVAL);
     int d = semctl(g_semid, SEM_FULL_D, GETVAL);
@@ -248,6 +293,10 @@ void print_state() {
 
 // Czeka na zakończenie - blokuje do sygnału lub zamknięcia magazynu
 // Kończy gdy SEM_WAREHOUSE_ON=0 lub otrzyma sygnał
+/**
+ * Blokuje proces magazynu do momentu otrzymania sygnału zakończenia
+ * lub zamknięcia bramki (SEM_WAREHOUSE_ON==0).
+ */
 void wait_for_shutdown() {
     while (!g_stop) {
         // Sprawdź czy magazyn zamknięty
@@ -264,6 +313,16 @@ void wait_for_shutdown() {
 }  // namespace
 
 // Główna funkcja magazynu
+/**
+ * Główna funkcja procesu magazynu.
+ *
+ * Tworzy IPC, ewentualnie wczytuje stan z pliku, a następnie oczekuje na
+ * sygnały (SIGUSR1 do zapisu, SIGTERM do zakończenia) lub na zamknięcie bramki.
+ *
+ * @param argc liczba argumentów (opcjonalny argument: liczba czekolad)
+ * @param argv tablica argumentów
+ * @return 0 przy poprawnym zakończeniu, niezerowy kod przy błędzie
+ */
 int main(int argc, char **argv) {
     int targetChocolates = kDefaultChocolates;
     if (argc > 1) {
@@ -355,6 +414,10 @@ int main(int argc, char **argv) {
         shmdt(g_header);
         g_header = nullptr;
     }
+
+    // Usuń zasoby IPC należące do magazynu - przydatne gdy dyrektor
+    // zginął (np. kill -9) i nie miał możliwości posprzątania.
+    cleanup_ipc();
 
     std::cout << "[MAGAZYN] Zakończono.\n";
     return 0;

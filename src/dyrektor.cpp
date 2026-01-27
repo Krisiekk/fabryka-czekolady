@@ -1,6 +1,13 @@
-// Dyrektor - główny proces sterujący fabryką
-// Uruchamia wszystkie procesy (magazyn, dostawcy, stanowiska)
-// Odbiera polecenia od użytkownika
+/**
+ * @file src/dyrektor.cpp
+ * @brief Dyrektor — główny proces sterujący fabryką.
+ *
+ * Uruchamia procesy pomocnicze (magazyn, dostawcy, stanowiska), obsługuje
+ * polecenia użytkownika i sekwencje zakończeń (StopAll). Zawiera też monitor
+ * stanu magazynu i mechanizmy czyszczenia zasobów IPC.
+ *
+ * Autor: Krzysztof Pietrzak (156721)
+ */
 
 #include "../include/common.h"
 
@@ -24,12 +31,29 @@ int g_msqid = -1;   // ID kolejki komunikatów
 std::thread g_monitor_thread;     // monitor zmian stanu magazynu
 std::atomic_bool g_monitor_running{false};
 
+/**
+ * Wypisuje błąd i kończy proces natychmiast (używane w child po fork() przy exec).
+ *
+ * Funkcja używa `_exit()` aby uniknąć uruchamiania destruktorów w niechcianym
+ * kontekście procesu potomnego. Przeznaczone do sytuacji krytycznych podczas
+ * `execv` (np. gdy exec się nie powiedzie).
+ *
+ * @param what nazwa funkcji/programu, który zawiódł (używane w perror)
+ */
 void die_exec(const char *what) {
     perror(what);
     _exit(EXIT_FAILURE);
-}
+} 
 
-// Uruchamia nowy proces i wykonuje program
+/**
+ * Uruchamia nowy proces i wykonuje program przez execv.
+ *
+ * Tworzy proces potomny i wykonuje w nim program podany jako tablica
+ * argumentów. W razie błędu kończy proces rodzica (die_exec).
+ *
+ * @param args lista argumentów, gdzie args[0] to ścieżka do programu
+ * @return pid potomka w procesie rodzicu, 0 w procesie potomnym
+ */
 pid_t spawn(const std::vector<std::string> &args) {
     pid_t pid = fork();
     
@@ -54,14 +78,27 @@ pid_t spawn(const std::vector<std::string> &args) {
     return pid;
 }
 
-// Tworzy klucz IPC
+/**
+ * Generuje klucz IPC przy użyciu `ftok` i stałych z `common.h`.
+ *
+ * Jeżeli `ftok` zwróci błąd, funkcja kończy program przy pomocy `die_exec`.
+ *
+ * @return wygenerowany klucz IPC (typ key_t)
+ */
 key_t make_key() {
     key_t key = ftok(kIpcKeyPath, kProjId);
     if (key == -1) die_exec("ftok");
     return key;
-}
+} 
 
-// Łączy się do zasobów IPC z retry
+/**
+ * Dołącza do zasobów IPC utworzonych przez `magazyn`.
+ *
+ * Próbujemy dołączyć semafory i pamięć dzieloną z retry (krótkie oczekiwania),
+ * aby `dyrektor` mógł dołączyć zaraz po uruchomieniu `magazyn`.
+ *
+ * @param targetChocolates parametr używany tylko przy obliczeniach rozmiaru (opcjonalny)
+ */
 void attach_ipc([[maybe_unused]] int targetChocolates) {
     key_t key = make_key();
     
@@ -89,24 +126,46 @@ void attach_ipc([[maybe_unused]] int targetChocolates) {
     die_exec("attach_ipc timeout");
 }
 
-// Wysyła sygnał do zakresu procesów
+/**
+ * Wysyła sygnał do zakresu procesów (wg indeksów w `g_children`).
+ *
+ * Używane do wysyłania SIGTERM/SIGCONT do podgrup procesów (np. dostawców,
+ * stanowisk). Jeśli dany indeks nie ma przypisanego PID (>0), jest pomijany.
+ *
+ * @param sig sygnał do wysłania (np. SIGTERM, SIGCONT)
+ * @param from indeks początkowy (inclusive)
+ * @param to indeks końcowy (exclusive)
+ */
 void send_signal_to_range(int sig, size_t from, size_t to) {
     for (size_t i = from; i < to && i < g_children.size(); ++i) {
         if (g_children[i] > 0) {
             kill(g_children[i], sig);
         }
     }
-}
+} 
 
+/**
+ * Wysyła sygnał do wszystkich znanych procesów potomnych.
+ *
+ * Przechodzi przez wektor `g_children` i wysyła `sig` do każdego prawidłowego PID.
+ *
+ * @param sig sygnał do wysłania
+ */
 void send_signal_to_all(int sig) {
     for (pid_t pid : g_children) {
         if (pid > 0) {
             kill(pid, sig);
         }
     }
-}
+} 
 
-// Wyślij stan magazynu (0 = closed, 1 = open) do wszystkich dzieci (wiadomości po pid)
+/**
+ * Wysyła stan magazynu do wszystkich procesów potomnych przez kolejkę msq.
+ *
+ * Stan: 0 = zamknięte, 1 = otwarte. Funkcja wycisza brak kolejki (g_msqid==-1).
+ *
+ * @param state 0=closed, 1=open
+ */
 void send_state_to_children(int state) {
     if (g_msqid == -1) return;
     for (pid_t pid : g_children) {
@@ -115,9 +174,17 @@ void send_state_to_children(int state) {
             std::perror("msq_send_pid");
         }
     }
-}
+} 
 
-// Monitoruje stan magazynu (stop/continue) i rozgłasza go
+/**
+ * Monitoruje proces `magazyn` pod kątem STOP/CONT i zakończenia.
+ *
+ * Funkcja wykonuje waitpid(magazyn_pid, ..., WUNTRACED|WCONTINUED) i na
+ * podstawie statusu zamyka/otwiera bramkę magazynu (SEM_WAREHOUSE_ON) i
+ * wysyła powiadomienia do dzieci przez kolejkę msq.
+ *
+ * @param magazyn_pid PID procesu `magazyn` do monitorowania
+ */
 void monitor_magazyn(pid_t magazyn_pid) {
     int status = 0;
 
@@ -149,14 +216,23 @@ void monitor_magazyn(pid_t magazyn_pid) {
     }
 }
 
-// Usuwa wszystkie zasoby IPC
+/**
+ * Usuwa zasoby IPC (semafory, pamięć dzieloną, kolejkę) jeśli istnieją.
+ *
+ * Używane przy kończeniu programu, żeby nie pozostawić starych zasobów.
+ */
 void remove_ipcs() {
     if (g_semid != -1) semctl(g_semid, 0, IPC_RMID);
     if (g_shmid != -1) shmctl(g_shmid, IPC_RMID, nullptr);
     if (g_msqid != -1) msgctl(g_msqid, IPC_RMID, nullptr);
-}
+} 
 
-// Czyści stare zasoby IPC (jeśli pozostały po poprzednim uruchomieniu)
+/**
+ * Usuwa stare zasoby IPC pozostawione po poprzednich uruchomieniach.
+ *
+ * Próbuje usunąć semafory, pamięć dzieloną i kolejkę komunikatów wskazane
+ * przez klucz generowany z `kIpcKeyPath`. Operacja jest defensywna.
+ */
 void cleanup_old_ipcs() {
     key_t key = ftok(kIpcKeyPath, kProjId);
     if (key == -1) return;
@@ -183,7 +259,12 @@ void cleanup_old_ipcs() {
     }
 }
 
-// Zatrzymuje wszystkie procesy gracefully
+/**
+ * Porządne zakończenie wszystkich procesów potomnych.
+ *
+ * Wysyła SIGTERM do wszystkich, czeka z krótkim timeoutem, a jeśli trzeba
+ * wysyła SIGKILL. Zbiera zombie i zwalnia zasoby.
+ */
 void graceful_shutdown() {
     // Wysyłanie SIGTERM
     std::cout << "[DYREKTOR] Wysyłam SIGTERM do wszystkich procesów...\n";
@@ -234,7 +315,11 @@ void graceful_shutdown() {
     }
 }
 
-// Uruchamia wszystkie procesy
+/**
+ * Uruchamia procesy fabryki: magazyn, dostawców i stanowiska.
+ *
+ * @param targetChocolates liczba czekolad na pracownika (przekazywana do magazynu)
+ */
 void start_processes(int targetChocolates) {
     // Magazyn na pierwszym miejscu
     spawn({"./magazyn", std::to_string(targetChocolates)});
@@ -252,13 +337,21 @@ void start_processes(int targetChocolates) {
     spawn({"./stanowisko", "2"});
 }
 
-// Czeka na zakończenie procesów z zakresu
+/**
+ * Czeka na zakończenie procesów z danego zakresu indeksów w g_children.
+ *
+ * Funkcja sprawdza okresowo waitpid(WNOHANG) i zwraca true jeśli wszystkie
+ * procesy zakończyły się w czasie timeout_sec.
+ *
+ * @param from indeks początkowy (inclusive)
+ * @param to indeks końcowy (exclusive)
+ * @param timeout_sec maksymalny czas w sekundach do oczekiwania
+ * @return true jeśli wszystkie procesy zakończyły się, false jeśli timeout
+ */
 bool wait_for_range(size_t from, size_t to, int timeout_sec) {
     std::vector<bool> reaped(g_children.size(), false);
     
-    // mniejszy interwał sprawdzania, krótsze timeouty
-    int checks = timeout_sec * 10; // 10 sprawdzeń na sekundę
-    for (int i = 0; i < checks; ++i) {
+    for (int i = 0; i < timeout_sec * 2; ++i) {  
         bool all_done = true;
         
         for (size_t j = from; j < to && j < g_children.size(); ++j) {
@@ -273,16 +366,34 @@ bool wait_for_range(size_t from, size_t to, int timeout_sec) {
             } else if (r == pid) {
                 reaped[j] = true;
                 g_children[j] = -1;  // oznacz jako zakończony
+            } else if (r == -1) {
+                if (errno == ECHILD) {
+                    // Proces nie jest już naszym potomkiem (być może został wcześniej zebrany)
+                    reaped[j] = true;
+                    g_children[j] = -1;
+                } else if (errno == EINTR) {
+                    all_done = false; // spróbuj ponownie
+                } else {
+                    // Nieznany błąd - oznacz jako zakończony, ale zgłoś ostrzeżenie
+                    std::perror("waitpid");
+                    reaped[j] = true;
+                    g_children[j] = -1;
+                }
             }
         }
         
         if (all_done) return true;
-        usleep(100000); // 100ms
+        usleep(500000);
     }
     return false;
 }
 
-// Główna pętla menu
+/**
+ * Główna pętla interaktywna dyrektora.
+ *
+ * Obsługuje komendy z stdin: StopFabryka, StopMagazyn, StopDostawcy, StopAll
+ * oraz quit. Funkcja blokuje wczytywanie poleceń do momentu wyjścia.
+ */
 void menu_loop() {
     std::cout << "Polecenie dyrektora (1-4, q=quit):\n";
     std::cout << "  1 - StopFabryka (zatrzymaj stanowiska)\n";
@@ -322,37 +433,30 @@ void menu_loop() {
         else if (choice == '4') {
             // StopAll - zapis stanu
             // Sekwencja: stanowiska -> dostawcy -> magazyn (z zapisem)
-            // Najpierw zamknij bramkę aby zabronić nowych dostaw i wznow zatrzymane procesy
-            log_raport(g_semid, "DYREKTOR", "StopAll - zamykam bramkę i wznowię zatrzymane procesy...");
-            {
-                union semun arg; arg.val = 0;
-                if (g_semid != -1) semctl(g_semid, SEM_WAREHOUSE_ON, SETVAL, arg);
-                send_state_to_children(0);
-                // Wznow wszystkie dzieci, żeby przyjęły SIGTERM natychmiast
-                send_signal_to_all(SIGCONT);
-            }
-
+            log_raport(g_semid, "DYREKTOR", "StopAll - zatrzymuję stanowiska...");
+            
             // 1) Zatrzymaj stanowiska (konsumentów)
             send_signal_to_range(SIGTERM, 5, 7);
-            if (!wait_for_range(5, 7, 3)) {
+            if (!wait_for_range(5, 7, 5)) { // wydłużony timeout dla stanowisk
                 std::cout << "[DYREKTOR] Timeout stanowisk - SIGKILL\n";
                 for (size_t j = 5; j < 7 && j < g_children.size(); ++j) {
-                    if (g_children[j] > 0) kill(g_children[j], SIGKILL);
+                    if (g_children[j] > 0) {
+                        std::cerr << "[DYREKTOR] Wysyłam SIGKILL do PID " << g_children[j] << "\n";
+                        kill(g_children[j], SIGKILL);
+                    }
                 }
-                wait_for_range(5, 7, 1);
+                wait_for_range(5, 7, 2);
             }
             
             // 2) Zatrzymaj dostawców (producentów)
             log_raport(g_semid, "DYREKTOR", "StopAll - zatrzymuję dostawców...");
-            // Wznow również na wszelki wypadek
-            send_signal_to_range(SIGCONT, 1, 5);
             send_signal_to_range(SIGTERM, 1, 5);
-            if (!wait_for_range(1, 5, 3)) {
+            if (!wait_for_range(1, 5, 5)) {
                 std::cout << "[DYREKTOR] Timeout dostawców - SIGKILL\n";
                 for (size_t j = 1; j < 5 && j < g_children.size(); ++j) {
                     if (g_children[j] > 0) kill(g_children[j], SIGKILL);
                 }
-                wait_for_range(1, 5, 1);
+                wait_for_range(1, 5, 2);
             }
             
             // 3) Teraz magazyn może bezpiecznie zapisać stan
@@ -365,10 +469,10 @@ void menu_loop() {
                 kill(g_children[0], SIGUSR1);  // magazyn zapisze stan i zakończy
 
                 // Zapobiega wyścigowi SIGUSR1 vs SIGTERM
-                if (!wait_for_range(0, 1, 3)) {
+                if (!wait_for_range(0, 1, 5)) {
                     std::cout << "[DYREKTOR] Timeout magazynu - SIGKILL\n";
                     kill(g_children[0], SIGKILL);
-                    wait_for_range(0, 1, 1);
+                    wait_for_range(0, 1, 2);
                 }
             }
             break;
@@ -384,6 +488,16 @@ void menu_loop() {
 
 }  // namespace
 
+/**
+ * Główny program dyrektora.
+ *
+ * Parsuje argument CLI (liczba czekolad na pracownika), usuwa stare IPC,
+ * uruchamia procesy potomne, dołącza do IPC i startuje pętlę menu.
+ *
+ * @param argc liczba argumentów
+ * @param argv tablica argumentów (argv[1] = liczba czekolad opcjonalnie)
+ * @return 0 przy sukcesie, niezerowy kod przy błędzie
+ */
 int main(int argc, char **argv) {
     int targetChocolates = kDefaultChocolates;
     
