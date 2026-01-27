@@ -460,23 +460,6 @@ bool produce_one() {
 - **Brak reakcji na SIGSTOP/SIGCONT magazynu** → po zatrzymaniu magazynu procesy dalej próbowały pracować; dodano wątek monitorujący w dyrektorze i powiadomienia przez msq (zamknięcie/otwarcie bramki).
 - **Race condition przy StopAll** → magazyn dostawał SIGTERM zanim obsłużył SIGUSR1; dodano sekwencję z `wait_for_range()` po SIGUSR1.
 - **Potencjalny deadlock mutexu przy awarii procesu** → jeśli proces padał w sekcji krytycznej, mutex zostawał zablokowany; ustawiono `SEM_UNDO` na mutexach.
-- **Orphaned process po zabiciu dyrektora** → dzieci zostawały w tle, IPC nie było sprzątane; dodano `prctl(PR_SET_PDEATHSIG, SIGTERM)` w procesach potomnych.
-
-#### 6.1. Testy — typowe przyczyny niepowodzeń i diagnostyka
-- **Brak pliku `magazyn_state.txt` lub `raport.txt` po teście** — najczęstsza przyczyna porażki testu 1/2/7. Sprawdź, czy test zakończył się poprawnie (timeouty) i czy `dyrektor` miał wystarczający czas na wysłanie `SIGUSR1` oraz na zapis stanu.
-  - Diagnostyka: uruchom ręcznie `./build/dyrektor N` i wykonaj sekwencję `4` (StopAll) z terminala; sprawdź `raport.txt` i `magazyn_state.txt` w katalogu `build/`.
-- **Brak logu potwierdzającego wczytanie stanu** — test 7 sprawdza obecność frazy `wczytano stan` w `raport.txt`. Upewnij się, że `magazyn` loguje wyraźną linię przy `load_state_from_file()` (np. `Wczytano stan z pliku ...`).
-- **Stare zasoby IPC (semafory/SHM) powodujące złe wartości** — jeśli poprzedni run zostawił IPC, semafory mogą mieć nieprawidłowe wartości. Test używa mechanizmu czyszczenia, ale ręcznie uruchom `ipcs -s/-m` i `ipcrm` jeśli coś zostało.
-- **Zatrzymany proces (SIGSTOP) w niewłaściwym miejscu** — może uniemożliwić zapis stanu lub poprawne zakończenie. Sprawdź `ps -o pid,pgid,stat,cmd` i użyj `kill -18 <pid>` aby wznowić oraz przejrzyj logi `raport.txt`.
-
-#### 6.2. Przydatne komendy diagnostyczne
-- Sprawdź log testów i pliki: `ls -l build/raport.txt build/magazyn_state.txt`  
-- Podejrzyj IPC: `ipcs -s` i `ipcs -m`  
-- Usuń konkretne semafory/pamięć: `ipcrm -s <semid>` lub `ipcrm -m <shmid>`  
-- Uruchom pojedynczy test ręcznie: `./build/dyrektor 10` → wpisz `4` (StopAll) i obserwuj `raport.txt`  
-- Uruchom skrypt testowy w trybie verbose: `bash -x tests/run_tests.sh` aby zobaczyć szczegóły wykonania i ewentualne błędy czasu wykonania.
-
-> **Uwaga:** testy mogą być wrażliwe na timeouty i kolejność sygnałów; przy fluktuacjach środowiska (obciążenie) zwiększenie timeoutów w `tests/run_tests.sh` pomaga stabilności.
 
 ---
 

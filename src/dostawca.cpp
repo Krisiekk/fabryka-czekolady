@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <sys/prctl.h>  // prctl(PR_SET_PDEATHSIG)
 #include <thread>
+#include <chrono>
 
 namespace {
 

@@ -259,15 +259,29 @@ void save_state_to_file() {
  * błędy przez `perror` jeśli operacje usunięcia się nie powiodą.
  */
 void cleanup_ipc() {
-    // Odłącz pamięć
-    if (g_header && shmdt(g_header) == -1) perror("shmdt"); 
-    
-    // Usuń zasoby IPC (magazyn jest właścicielem)
+    // Odłącz pamięć (ignoruj, jeśli już odłączono lub zasób nie istnieje)
+    if (g_header) {
+        if (shmdt(g_header) == -1) {
+            if (errno != EINVAL && errno != EIDRM && errno != ENOENT) perror("shmdt");
+        }
+        g_header = nullptr;
+    }
+
+    // Usuń zasoby IPC (magazyn jest właścicielem). Tolerujemy przypadek gdy
+    // zasoby już usunięto (inne procesy lub wcześniejsze cleanup).
     if (g_shmid != -1) {
-        if (shmctl(g_shmid, IPC_RMID, nullptr) == -1) perror("shmctl IPC_RMID");
+        if (shmctl(g_shmid, IPC_RMID, nullptr) == -1) {
+            if (errno != EINVAL && errno != EIDRM && errno != ENOENT) perror("shmctl IPC_RMID");
+        } else {
+            g_shmid = -1;
+        }
     }
     if (g_semid != -1) {
-        if (semctl(g_semid, 0, IPC_RMID) == -1) perror("semctl IPC_RMID");
+        if (semctl(g_semid, 0, IPC_RMID) == -1) {
+            if (errno != EINVAL && errno != EIDRM && errno != ENOENT) perror("semctl IPC_RMID");
+        } else {
+            g_semid = -1;
+        }
     }
 }
 
@@ -414,11 +428,7 @@ int main(int argc, char **argv) {
         shmdt(g_header);
         g_header = nullptr;
     }
-
-    // Usuń zasoby IPC należące do magazynu - przydatne gdy dyrektor
-    // zginął (np. kill -9) i nie miał możliwości posprzątania.
     cleanup_ipc();
-
     std::cout << "[MAGAZYN] Zakończono.\n";
     return 0;
 }

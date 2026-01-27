@@ -222,9 +222,36 @@ void monitor_magazyn(pid_t magazyn_pid) {
  * Używane przy kończeniu programu, żeby nie pozostawić starych zasobów.
  */
 void remove_ipcs() {
-    if (g_semid != -1) semctl(g_semid, 0, IPC_RMID);
-    if (g_shmid != -1) shmctl(g_shmid, IPC_RMID, nullptr);
-    if (g_msqid != -1) msgctl(g_msqid, IPC_RMID, nullptr);
+    // Ignoruj oczekiwane błędy przy podwójnym usuwaniu (np. EINVAL/EIDRM/ENOENT)
+    if (g_semid != -1) {
+        if (semctl(g_semid, 0, IPC_RMID) == -1) {
+            if (errno != EINVAL && errno != EIDRM && errno != ENOENT) {
+                perror("semctl IPC_RMID");
+            }
+        } else {
+            g_semid = -1;
+        }
+    }
+
+    if (g_shmid != -1) {
+        if (shmctl(g_shmid, IPC_RMID, nullptr) == -1) {
+            if (errno != EINVAL && errno != EIDRM && errno != ENOENT) {
+                perror("shmctl IPC_RMID");
+            }
+        } else {
+            g_shmid = -1;
+        }
+    }
+
+    if (g_msqid != -1) {
+        if (msgctl(g_msqid, IPC_RMID, nullptr) == -1) {
+            if (errno != EINVAL && errno != EIDRM && errno != ENOENT) {
+                perror("msgctl IPC_RMID");
+            }
+        } else {
+            g_msqid = -1;
+        }
+    }
 } 
 
 /**
