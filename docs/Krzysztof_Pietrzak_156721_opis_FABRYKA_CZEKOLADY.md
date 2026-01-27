@@ -640,38 +640,40 @@ Testy automatyczne są w `tests/run_tests.sh` (łącznie 7). Poniżej opis każd
 ---
 
 ## 9. Linki do repozytorium (wymagane fragmenty kodu)
-Poniżej linki do kluczowych plików z wymaganymi konstrukcjami.
+Poniżej linki do kluczowych plików i konkretnych fragmentów **w commicie** 
 
 ```text
 Repozytorium: https://github.com/Krisiekk/fabryka-czekolady
+Procesy (fork / exec / wait):
+- spawn (fork+exec): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dyrektor.cpp#L57-L86
+- start_processes (uruchamianie procesów): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dyrektor.cpp#L350-L368
+- monitor_magazyn (waitpid STOP/CONT): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dyrektor.cpp#L111-L148
 
-Procesy (fork/exec/wait):
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/dyrektor.cpp
+Semafory (semget / semctl / semop):
+- definicje i helpery (`sem_P_intr`, `sem_V_retry`): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/include/common.h#L276-L306
+- bramka atomowa (`pass_gate_intr`): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/include/common.h#L336-L345
+- inicjalizacja semaforów (magazyn): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/magazyn.cpp#L60-L105
 
-Semafory (semget/semctl/semop):
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/include/common.h
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/magazyn.cpp
+Pamięć dzielona (shmget / shmat / shmdt / shmctl):
+- tworzenie i mapowanie SHM (magazyn): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/magazyn.cpp#L60-L84
+- dołączenie i shmat w dostawca: https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dostawca.cpp#L144-L160
+- dołączenie i shmat w stanowisko: https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/stanowisko.cpp#L63-L78
 
-Pamięć dzielona (shmget/shmat/shmdt/shmctl):
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/magazyn.cpp
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/dostawca.cpp
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/stanowisko.cpp
+Kolejka komunikatów (msgget / msgsnd / msgrcv / msgctl):
+- helpery msq (msq_send_pid / msq_recv_pid_intr): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/include/common.h#L352-L372
+- wysyłanie stanu z dyrektora: https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dyrektor.cpp#L77-L102
+- nasłuch w dostawca (msgrcv loop): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dostawca.cpp#L168-L192
+- nasłuch w stanowisko (msgrcv loop): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/stanowisko.cpp#L298-L320
 
-Kolejka komunikatów (msgget/msgsnd/msgrcv/msgctl):
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/include/common.h
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/dyrektor.cpp
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/dostawca.cpp
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/stanowisko.cpp
+Sygnały (sigaction / kill / prctl):
+- setup handlerów (setup_sigaction): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/include/common.h#L468-L480
+- parent-death (prctl) w magazyn: https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/magazyn.cpp#L369-L369
+- parent-death (prctl) w dostawca: https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dostawca.cpp#L291-L291
+- monitor SIGSTOP/SIGCONT (dyrektor): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/dyrektor.cpp#L111-L148
 
-Sygnały (sigaction/kill):
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/include/common.h
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/dyrektor.cpp
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/magazyn.cpp
-
-Pliki (open/read/write/close):
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/src/magazyn.cpp
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/include/common.h
+Pliki (open / read / write / close):
+- zapis stanu (magazyn): https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/src/magazyn.cpp#L236-L253
 
 Testy:
-- https://github.com/Krisiekk/fabryka-czekolady/blob/main/tests/run_tests.sh
+- skrypt testowy: https://github.com/Krisiekk/fabryka-czekolady/blob/e86b2b08dd266b5a2d6a3eaee5aeb5627eb37a0e/tests/run_tests.sh
 ```
